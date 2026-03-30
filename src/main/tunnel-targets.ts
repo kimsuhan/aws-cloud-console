@@ -1,63 +1,51 @@
-import { spawn } from 'node:child_process'
+import {
+  DescribeReplicationGroupsCommand,
+  DescribeServerlessCachesCommand,
+  ElastiCacheClient,
+  type DescribeReplicationGroupsCommandOutput,
+  type DescribeServerlessCachesCommandOutput,
+  type ElastiCacheClientConfig
+} from '@aws-sdk/client-elasticache'
+import {
+  DescribeDBClustersCommand,
+  DescribeDBInstancesCommand,
+  RDSClient,
+  type DescribeDBClustersCommandOutput,
+  type DescribeDBInstancesCommandOutput,
+  type RDSClientConfig
+} from '@aws-sdk/client-rds'
 
-import type { ActiveProfileState, TunnelKind, TunnelTargetSummary } from '../shared/contracts'
+import type { TunnelKind, TunnelTargetSummary } from '../shared/contracts'
+import type { ActiveProfileWithCredentials } from './profile-store'
 
-function runAwsCommand(command: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command[0], command.slice(1))
-    let output = ''
-    let errorOutput = ''
-
-    child.stdout.on('data', (chunk) => {
-      output += chunk.toString()
-    })
-
-    child.stderr.on('data', (chunk) => {
-      errorOutput += chunk.toString()
-    })
-
-    child.once('error', reject)
-    child.once('close', (code) => {
-      if (code === 0) {
-        resolve(output)
-        return
-      }
-
-      reject(new Error(errorOutput.trim() || `AWS query failed with exit code ${code ?? 'unknown'}`))
-    })
-  })
+interface RdsClientLike {
+  send(command: DescribeDBInstancesCommand | DescribeDBClustersCommand): Promise<DescribeDBInstancesCommandOutput | DescribeDBClustersCommandOutput>
 }
 
-function baseAwsArgs(activeProfile: ActiveProfileState): string[] {
-  return ['aws', '--profile', activeProfile.profileName, '--region', activeProfile.region]
+interface ElasticacheClientLike {
+  send(
+    command: DescribeReplicationGroupsCommand | DescribeServerlessCachesCommand
+  ): Promise<DescribeReplicationGroupsCommandOutput | DescribeServerlessCachesCommandOutput>
 }
 
-export function buildDescribeDbInstancesCommand(activeProfile: ActiveProfileState): string[] {
-  return [...baseAwsArgs(activeProfile), 'rds', 'describe-db-instances', '--output', 'json']
+interface TunnelTargetClientFactory {
+  createRdsClient(config: RDSClientConfig): RdsClientLike
+  createElasticacheClient(config: ElastiCacheClientConfig): ElasticacheClientLike
 }
 
-export function buildDescribeDbClustersCommand(activeProfile: ActiveProfileState): string[] {
-  return [...baseAwsArgs(activeProfile), 'rds', 'describe-db-clusters', '--output', 'json']
-}
-
-export function buildDescribeReplicationGroupsCommand(activeProfile: ActiveProfileState): string[] {
-  return [...baseAwsArgs(activeProfile), 'elasticache', 'describe-replication-groups', '--output', 'json']
-}
-
-export function buildDescribeServerlessCachesCommand(activeProfile: ActiveProfileState): string[] {
-  return [...baseAwsArgs(activeProfile), 'elasticache', 'describe-serverless-caches', '--output', 'json']
-}
-
-export function mapDbInstanceTargets(stdout: string): TunnelTargetSummary[] {
-  const parsed = JSON.parse(stdout) as {
-    DBInstances?: Array<{
-      DBInstanceIdentifier?: string
-      Engine?: string
-      Endpoint?: { Address?: string; Port?: number }
-    }>
+function createClientConfig(activeProfile: ActiveProfileWithCredentials): RDSClientConfig & ElastiCacheClientConfig {
+  return {
+    region: activeProfile.profile.region,
+    credentials: {
+      accessKeyId: activeProfile.credentials.accessKeyId,
+      secretAccessKey: activeProfile.credentials.secretAccessKey,
+      sessionToken: activeProfile.credentials.sessionToken
+    }
   }
+}
 
-  return (parsed.DBInstances ?? [])
+export function mapDbInstanceTargets(output: DescribeDBInstancesCommandOutput): TunnelTargetSummary[] {
+  return (output.DBInstances ?? [])
     .filter((instance) => instance.Endpoint?.Address && instance.Endpoint?.Port)
     .map((instance) => ({
       id: `db-instance:${instance.DBInstanceIdentifier ?? 'unknown'}`,
@@ -70,17 +58,8 @@ export function mapDbInstanceTargets(stdout: string): TunnelTargetSummary[] {
     }))
 }
 
-export function mapDbClusterTargets(stdout: string): TunnelTargetSummary[] {
-  const parsed = JSON.parse(stdout) as {
-    DBClusters?: Array<{
-      DBClusterIdentifier?: string
-      Engine?: string
-      Endpoint?: string
-      Port?: number
-    }>
-  }
-
-  return (parsed.DBClusters ?? [])
+export function mapDbClusterTargets(output: DescribeDBClustersCommandOutput): TunnelTargetSummary[] {
+  return (output.DBClusters ?? [])
     .filter((cluster) => cluster.Endpoint && cluster.Port)
     .map((cluster) => ({
       id: `db-cluster:${cluster.DBClusterIdentifier ?? 'unknown'}`,
@@ -93,50 +72,31 @@ export function mapDbClusterTargets(stdout: string): TunnelTargetSummary[] {
     }))
 }
 
-export function mapReplicationGroupTargets(stdout: string): TunnelTargetSummary[] {
-  const parsed = JSON.parse(stdout) as {
-    ReplicationGroups?: Array<{
-      ReplicationGroupId?: string
-      Engine?: string
-      ConfigurationEndpoint?: { Address?: string; Port?: number }
-      NodeGroups?: Array<{ PrimaryEndpoint?: { Address?: string; Port?: number } }>
-    }>
-  }
+export function mapReplicationGroupTargets(output: DescribeReplicationGroupsCommandOutput): TunnelTargetSummary[] {
+  return (output.ReplicationGroups ?? []).flatMap((group) => {
+    const endpoint =
+      group.ConfigurationEndpoint ?? group.NodeGroups?.find((nodeGroup) => nodeGroup.PrimaryEndpoint)?.PrimaryEndpoint
 
-  return (parsed.ReplicationGroups ?? [])
-    .flatMap((group) => {
-      const endpoint =
-        group.ConfigurationEndpoint ??
-        group.NodeGroups?.find((nodeGroup) => nodeGroup.PrimaryEndpoint)?.PrimaryEndpoint
+    if (!endpoint?.Address || !endpoint.Port) {
+      return []
+    }
 
-      if (!endpoint?.Address || !endpoint.Port) {
-        return []
+    return [
+      {
+        id: `redis-rg:${group.ReplicationGroupId ?? 'unknown'}`,
+        kind: 'redis' as TunnelKind,
+        name: group.ReplicationGroupId ?? 'unknown-redis-group',
+        engine: group.Engine ?? 'redis',
+        endpoint: endpoint.Address,
+        remotePort: endpoint.Port,
+        source: 'elasticache-replication-group'
       }
-
-      return [
-        {
-          id: `redis-rg:${group.ReplicationGroupId ?? 'unknown'}`,
-          kind: 'redis' as TunnelKind,
-          name: group.ReplicationGroupId ?? 'unknown-redis-group',
-          engine: group.Engine ?? 'redis',
-          endpoint: endpoint.Address,
-          remotePort: endpoint.Port,
-          source: 'elasticache-replication-group'
-        }
-      ]
-    })
+    ]
+  })
 }
 
-export function mapServerlessCacheTargets(stdout: string): TunnelTargetSummary[] {
-  const parsed = JSON.parse(stdout) as {
-    ServerlessCaches?: Array<{
-      ServerlessCacheName?: string
-      Engine?: string
-      Endpoint?: { Address?: string; Port?: number }
-    }>
-  }
-
-  return (parsed.ServerlessCaches ?? [])
+export function mapServerlessCacheTargets(output: DescribeServerlessCachesCommandOutput): TunnelTargetSummary[] {
+  return (output.ServerlessCaches ?? [])
     .filter((cache) => cache.Endpoint?.Address && cache.Endpoint?.Port)
     .map((cache) => ({
       id: `redis-serverless:${cache.ServerlessCacheName ?? 'unknown'}`,
@@ -149,19 +109,34 @@ export function mapServerlessCacheTargets(stdout: string): TunnelTargetSummary[]
     }))
 }
 
-export async function listTunnelTargets(activeProfile: ActiveProfileState, kind: TunnelKind): Promise<TunnelTargetSummary[]> {
+export async function listTunnelTargets(
+  activeProfile: ActiveProfileWithCredentials,
+  kind: TunnelKind,
+  factory: TunnelTargetClientFactory = {
+    createRdsClient(config) {
+      return new RDSClient(config)
+    },
+    createElasticacheClient(config) {
+      return new ElastiCacheClient(config)
+    }
+  }
+): Promise<TunnelTargetSummary[]> {
+  const config = createClientConfig(activeProfile)
+
   if (kind === 'db') {
+    const client = factory.createRdsClient(config)
     const [instances, clusters] = await Promise.all([
-      runAwsCommand(buildDescribeDbInstancesCommand(activeProfile)),
-      runAwsCommand(buildDescribeDbClustersCommand(activeProfile))
+      client.send(new DescribeDBInstancesCommand({})) as Promise<DescribeDBInstancesCommandOutput>,
+      client.send(new DescribeDBClustersCommand({})) as Promise<DescribeDBClustersCommandOutput>
     ])
 
     return [...mapDbInstanceTargets(instances), ...mapDbClusterTargets(clusters)]
   }
 
+  const client = factory.createElasticacheClient(config)
   const [replicationGroups, serverlessCaches] = await Promise.all([
-    runAwsCommand(buildDescribeReplicationGroupsCommand(activeProfile)),
-    runAwsCommand(buildDescribeServerlessCachesCommand(activeProfile))
+    client.send(new DescribeReplicationGroupsCommand({})) as Promise<DescribeReplicationGroupsCommandOutput>,
+    client.send(new DescribeServerlessCachesCommand({})) as Promise<DescribeServerlessCachesCommandOutput>
   ])
 
   return [...mapReplicationGroupTargets(replicationGroups), ...mapServerlessCacheTargets(serverlessCaches)]

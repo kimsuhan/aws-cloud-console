@@ -1,23 +1,69 @@
 export type ActionId = 'ec2-ssm-connect' | 'aws-tunneling'
 
+export type DependencySource = 'configured' | 'well-known' | 'path' | 'missing'
+
+export interface ResolvedDependencyStatus {
+  installed: boolean
+  resolvedPath: string | null
+  source: DependencySource
+  error: string | null
+}
+
 export interface DependencyStatus {
-  awsCliInstalled: boolean
-  sessionManagerPluginInstalled: boolean
+  awsCli: ResolvedDependencyStatus
+  sessionManagerPlugin: ResolvedDependencyStatus
 }
 
-export interface ProfileSummary {
+export interface AppProfileSummary {
+  id: string
   name: string
+  region: string
+  createdAt: string
+  updatedAt: string
+  hasSessionToken: boolean
+  isDefault: boolean
 }
 
-export interface ActiveProfileState {
-  profileName: string
+export interface CreateProfileRequest {
+  name: string
   region: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+}
+
+export interface UpdateProfileRequest {
+  id: string
+  name: string
+  region: string
+  accessKeyId?: string
+  secretAccessKey?: string
+  sessionToken?: string
+}
+
+export interface RuntimeConfigState {
+  awsCliPath: string | null
+  sessionManagerPluginPath: string | null
+}
+
+export interface UpdateRuntimePathsRequest {
+  awsCliPath: string | null
+  sessionManagerPluginPath: string | null
+}
+
+export interface LegacyImportResult {
+  importedCount: number
+  skippedCount: number
 }
 
 export interface AppReadinessState {
   dependencyStatus: DependencyStatus
-  profiles: ProfileSummary[]
-  activeProfile: ActiveProfileState | null
+  profiles: AppProfileSummary[]
+  activeProfile: AppProfileSummary | null
+  runtimeConfig: RuntimeConfigState
+  needsProfileSetup: boolean
+  needsDependencySetup: boolean
+  canImportLegacyProfiles: boolean
 }
 
 export interface Ec2InstanceSummary {
@@ -35,6 +81,7 @@ export interface SessionTabState {
   title: string
   instanceId: string
   instanceName: string
+  profileId: string
   profileName: string
   region: string
   status: SessionStatus
@@ -91,6 +138,7 @@ export interface TunnelSessionState {
   localPort: number
   jumpInstanceId: string
   jumpInstanceName: string
+  profileId: string
   profileName: string
   region: string
   status: TunnelStatus
@@ -124,10 +172,16 @@ export interface TunnelErrorEvent {
 
 export interface ElectronApi {
   getAppReadiness: () => Promise<AppReadinessState>
-  listAwsProfiles: () => Promise<ProfileSummary[]>
-  selectAwsProfile: (profileName: string) => Promise<ActiveProfileState>
-  setActiveRegion: (region: string) => Promise<ActiveProfileState>
-  resetActiveProfile: () => Promise<void>
+  listProfiles: () => Promise<AppProfileSummary[]>
+  createProfile: (request: CreateProfileRequest) => Promise<AppProfileSummary>
+  updateProfile: (request: UpdateProfileRequest) => Promise<AppProfileSummary>
+  deleteProfile: (profileId: string) => Promise<void>
+  selectActiveProfile: (profileId: string) => Promise<AppProfileSummary>
+  setDefaultProfile: (profileId: string) => Promise<AppProfileSummary>
+  getRuntimeConfig: () => Promise<RuntimeConfigState>
+  updateRuntimePaths: (request: UpdateRuntimePathsRequest) => Promise<RuntimeConfigState>
+  importLegacyProfiles: () => Promise<LegacyImportResult>
+  dismissLegacyImport: () => Promise<void>
   listEc2Instances: () => Promise<Ec2InstanceSummary[]>
   listTunnelTargets: (kind: TunnelKind) => Promise<TunnelTargetSummary[]>
   openTunnelSession: (request: OpenTunnelSessionRequest) => Promise<TunnelSessionState>

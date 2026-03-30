@@ -1,35 +1,29 @@
-import { spawn } from 'node:child_process'
+import { DescribeInstancesCommand, EC2Client, type DescribeInstancesCommandOutput, type EC2ClientConfig } from '@aws-sdk/client-ec2'
 
-import type { ActiveProfileState, Ec2InstanceSummary } from '../shared/contracts'
+import type { Ec2InstanceSummary } from '../shared/contracts'
+import type { ActiveProfileWithCredentials } from './profile-store'
 
-export function buildDescribeInstancesCommand(activeProfile: ActiveProfileState): string[] {
-  return [
-    'aws',
-    '--profile',
-    activeProfile.profileName,
-    '--region',
-    activeProfile.region,
-    'ec2',
-    'describe-instances',
-    '--output',
-    'json'
-  ]
+interface Ec2ClientLike {
+  send(command: DescribeInstancesCommand): Promise<DescribeInstancesCommandOutput>
 }
 
-export function mapDescribeInstancesOutput(stdout: string): Ec2InstanceSummary[] {
-  const parsed = JSON.parse(stdout) as {
-    Reservations?: Array<{
-      Instances?: Array<{
-        InstanceId?: string
-        State?: { Name?: string }
-        PrivateIpAddress?: string
-        Placement?: { AvailabilityZone?: string }
-        Tags?: Array<{ Key?: string; Value?: string }>
-      }>
-    }>
-  }
+interface Ec2ClientFactory {
+  createClient(config: EC2ClientConfig): Ec2ClientLike
+}
 
-  return (parsed.Reservations ?? []).flatMap((reservation) =>
+function createClientConfig(activeProfile: ActiveProfileWithCredentials): EC2ClientConfig {
+  return {
+    region: activeProfile.profile.region,
+    credentials: {
+      accessKeyId: activeProfile.credentials.accessKeyId,
+      secretAccessKey: activeProfile.credentials.secretAccessKey,
+      sessionToken: activeProfile.credentials.sessionToken
+    }
+  }
+}
+
+export function mapDescribeInstancesOutput(output: DescribeInstancesCommandOutput): Ec2InstanceSummary[] {
+  return (output.Reservations ?? []).flatMap((reservation) =>
     (reservation.Instances ?? []).map((instance) => ({
       id: instance.InstanceId ?? 'unknown-instance',
       name: instance.Tags?.find((tag) => tag.Key === 'Name')?.Value ?? instance.InstanceId ?? 'Unnamed instance',
@@ -40,32 +34,15 @@ export function mapDescribeInstancesOutput(stdout: string): Ec2InstanceSummary[]
   )
 }
 
-export async function listEc2Instances(activeProfile: ActiveProfileState): Promise<Ec2InstanceSummary[]> {
-  const command = buildDescribeInstancesCommand(activeProfile)
-
-  const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(command[0], command.slice(1))
-    let output = ''
-    let errorOutput = ''
-
-    child.stdout.on('data', (chunk) => {
-      output += chunk.toString()
-    })
-
-    child.stderr.on('data', (chunk) => {
-      errorOutput += chunk.toString()
-    })
-
-    child.once('error', reject)
-    child.once('close', (code) => {
-      if (code === 0) {
-        resolve(output)
-        return
-      }
-
-      reject(new Error(errorOutput.trim() || `EC2 query failed with exit code ${code ?? 'unknown'}`))
-    })
-  })
-
-  return mapDescribeInstancesOutput(stdout)
+export async function listEc2Instances(
+  activeProfile: ActiveProfileWithCredentials,
+  factory: Ec2ClientFactory = {
+    createClient(config) {
+      return new EC2Client(config)
+    }
+  }
+): Promise<Ec2InstanceSummary[]> {
+  const client = factory.createClient(createClientConfig(activeProfile))
+  const output = await client.send(new DescribeInstancesCommand({}))
+  return mapDescribeInstancesOutput(output)
 }

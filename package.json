@@ -1,7 +1,7 @@
 {
   "name": "aws-cloud-console",
   "productName": "AWS Cloud Console",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "author": "Suhan Kim",
   "description": "AWS Cloud Console powered by Electron and TypeScript",
@@ -20,6 +20,9 @@
     "mcp:electron": "npx -y @ohah/electron-mcp-server"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.917.0",
+    "@aws-sdk/client-elasticache": "^3.917.0",
+    "@aws-sdk/client-rds": "^3.917.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.0.0",

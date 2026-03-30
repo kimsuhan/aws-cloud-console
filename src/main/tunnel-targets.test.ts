@@ -2,94 +2,156 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  buildDescribeDbClustersCommand,
-  buildDescribeDbInstancesCommand,
-  buildDescribeServerlessCachesCommand,
-  buildDescribeReplicationGroupsCommand,
+  listTunnelTargets,
   mapDbClusterTargets,
   mapDbInstanceTargets,
   mapReplicationGroupTargets,
   mapServerlessCacheTargets
 } from './tunnel-targets'
 
-test('buildDescribeDbInstancesCommand uses active profile and region', () => {
-  const command = buildDescribeDbInstancesCommand({
-    profileName: 'ility',
-    region: 'ap-southeast-1'
+const activeProfile = {
+  profile: {
+    id: 'profile-1',
+    name: 'ility',
+    region: 'ap-southeast-1',
+    createdAt: '2026-03-30T00:00:00.000Z',
+    updatedAt: '2026-03-30T00:00:00.000Z',
+    hasSessionToken: false,
+    isDefault: true
+  },
+  credentials: {
+    accessKeyId: 'AKIAILITY',
+    secretAccessKey: 'super-secret'
+  }
+}
+
+test('listTunnelTargets loads database targets with direct credentials', async () => {
+  const configs: Array<{ kind: 'rds' | 'elasticache'; config: unknown }> = []
+  const targets = await listTunnelTargets(activeProfile, 'db', {
+    createRdsClient(config) {
+      configs.push({ kind: 'rds', config })
+      return {
+        send: async (command) => {
+          const commandName = command.constructor.name
+          if (commandName === 'DescribeDBInstancesCommand') {
+            return {
+              DBInstances: [
+                {
+                  DBInstanceIdentifier: 'ility-db',
+                  Engine: 'postgres',
+                  Endpoint: { Address: 'ility-db.example', Port: 5432 }
+                }
+              ]
+            }
+          }
+
+          return {
+            DBClusters: [
+              {
+                DBClusterIdentifier: 'ility-cluster',
+                Engine: 'aurora-postgresql',
+                Endpoint: 'ility-cluster.example',
+                Port: 5432
+              }
+            ]
+          }
+        }
+      }
+    },
+    createElasticacheClient(config) {
+      configs.push({ kind: 'elasticache', config })
+      return {
+        send: async () => ({})
+      }
+    }
   })
 
-  assert.deepEqual(command, [
-    'aws',
-    '--profile',
-    'ility',
-    '--region',
-    'ap-southeast-1',
-    'rds',
-    'describe-db-instances',
-    '--output',
-    'json'
+  assert.deepEqual(configs, [
+    {
+      kind: 'rds',
+      config: {
+        region: 'ap-southeast-1',
+        credentials: {
+          accessKeyId: 'AKIAILITY',
+          secretAccessKey: 'super-secret',
+          sessionToken: undefined
+        }
+      }
+    }
   ])
+  assert.deepEqual(
+    targets.map((target) => ({ id: target.id, source: target.source })),
+    [
+      { id: 'db-instance:ility-db', source: 'rds-instance' },
+      { id: 'db-cluster:ility-cluster', source: 'rds-cluster' }
+    ]
+  )
 })
 
-test('buildDescribeDbClustersCommand uses active profile and region', () => {
-  const command = buildDescribeDbClustersCommand({
-    profileName: 'ility',
-    region: 'ap-southeast-1'
+test('listTunnelTargets loads redis targets with direct credentials', async () => {
+  const configs: Array<{ kind: 'rds' | 'elasticache'; config: unknown }> = []
+  const targets = await listTunnelTargets(activeProfile, 'redis', {
+    createRdsClient(config) {
+      configs.push({ kind: 'rds', config })
+      return {
+        send: async () => ({})
+      }
+    },
+    createElasticacheClient(config) {
+      configs.push({ kind: 'elasticache', config })
+      return {
+        send: async (command) => {
+          const commandName = command.constructor.name
+          if (commandName === 'DescribeReplicationGroupsCommand') {
+            return {
+              ReplicationGroups: [
+                {
+                  ReplicationGroupId: 'ility-redis',
+                  Engine: 'redis',
+                  ConfigurationEndpoint: { Address: 'ility-redis.example', Port: 6379 }
+                }
+              ]
+            }
+          }
+
+          return {
+            ServerlessCaches: [
+              {
+                ServerlessCacheName: 'ility-serverless',
+                Engine: 'redis',
+                Endpoint: { Address: 'ility-serverless.example', Port: 6379 }
+              }
+            ]
+          }
+        }
+      }
+    }
   })
 
-  assert.deepEqual(command, [
-    'aws',
-    '--profile',
-    'ility',
-    '--region',
-    'ap-southeast-1',
-    'rds',
-    'describe-db-clusters',
-    '--output',
-    'json'
+  assert.deepEqual(configs, [
+    {
+      kind: 'elasticache',
+      config: {
+        region: 'ap-southeast-1',
+        credentials: {
+          accessKeyId: 'AKIAILITY',
+          secretAccessKey: 'super-secret',
+          sessionToken: undefined
+        }
+      }
+    }
   ])
-})
-
-test('buildDescribeReplicationGroupsCommand uses active profile and region', () => {
-  const command = buildDescribeReplicationGroupsCommand({
-    profileName: 'ility',
-    region: 'ap-southeast-1'
-  })
-
-  assert.deepEqual(command, [
-    'aws',
-    '--profile',
-    'ility',
-    '--region',
-    'ap-southeast-1',
-    'elasticache',
-    'describe-replication-groups',
-    '--output',
-    'json'
-  ])
-})
-
-test('buildDescribeServerlessCachesCommand uses active profile and region', () => {
-  const command = buildDescribeServerlessCachesCommand({
-    profileName: 'ility',
-    region: 'ap-southeast-1'
-  })
-
-  assert.deepEqual(command, [
-    'aws',
-    '--profile',
-    'ility',
-    '--region',
-    'ap-southeast-1',
-    'elasticache',
-    'describe-serverless-caches',
-    '--output',
-    'json'
-  ])
+  assert.deepEqual(
+    targets.map((target) => ({ id: target.id, source: target.source })),
+    [
+      { id: 'redis-rg:ility-redis', source: 'elasticache-replication-group' },
+      { id: 'redis-serverless:ility-serverless', source: 'elasticache-serverless' }
+    ]
+  )
 })
 
 test('mapDbInstanceTargets returns endpoint based tunnel rows', () => {
-  const targets = mapDbInstanceTargets(JSON.stringify({
+  const targets = mapDbInstanceTargets({
     DBInstances: [
       {
         DBInstanceIdentifier: 'ility-db',
@@ -100,7 +162,7 @@ test('mapDbInstanceTargets returns endpoint based tunnel rows', () => {
         }
       }
     ]
-  }))
+  })
 
   assert.deepEqual(targets, [
     {
@@ -116,24 +178,24 @@ test('mapDbInstanceTargets returns endpoint based tunnel rows', () => {
 })
 
 test('mapDbClusterTargets returns cluster endpoint tunnel rows', () => {
-  const targets = mapDbClusterTargets(JSON.stringify({
+  const targets = mapDbClusterTargets({
     DBClusters: [
       {
-        DBClusterIdentifier: 'ility-aurora',
+        DBClusterIdentifier: 'ility-cluster',
         Engine: 'aurora-postgresql',
-        Endpoint: 'ility-aurora.cluster-abc.apse1.rds.amazonaws.com',
+        Endpoint: 'ility-cluster.cluster-abc.apse1.rds.amazonaws.com',
         Port: 5432
       }
     ]
-  }))
+  })
 
   assert.deepEqual(targets, [
     {
-      id: 'db-cluster:ility-aurora',
+      id: 'db-cluster:ility-cluster',
       kind: 'db',
-      name: 'ility-aurora',
+      name: 'ility-cluster',
       engine: 'aurora-postgresql',
-      endpoint: 'ility-aurora.cluster-abc.apse1.rds.amazonaws.com',
+      endpoint: 'ility-cluster.cluster-abc.apse1.rds.amazonaws.com',
       remotePort: 5432,
       source: 'rds-cluster'
     }
@@ -141,18 +203,22 @@ test('mapDbClusterTargets returns cluster endpoint tunnel rows', () => {
 })
 
 test('mapReplicationGroupTargets returns primary redis endpoints', () => {
-  const targets = mapReplicationGroupTargets(JSON.stringify({
+  const targets = mapReplicationGroupTargets({
     ReplicationGroups: [
       {
         ReplicationGroupId: 'ility-redis',
         Engine: 'redis',
-        ConfigurationEndpoint: {
-          Address: 'ility-redis.cfg.use1.cache.amazonaws.com',
-          Port: 6379
-        }
+        NodeGroups: [
+          {
+            PrimaryEndpoint: {
+              Address: 'ility-redis.abc.use1.cache.amazonaws.com',
+              Port: 6379
+            }
+          }
+        ]
       }
     ]
-  }))
+  })
 
   assert.deepEqual(targets, [
     {
@@ -160,7 +226,7 @@ test('mapReplicationGroupTargets returns primary redis endpoints', () => {
       kind: 'redis',
       name: 'ility-redis',
       engine: 'redis',
-      endpoint: 'ility-redis.cfg.use1.cache.amazonaws.com',
+      endpoint: 'ility-redis.abc.use1.cache.amazonaws.com',
       remotePort: 6379,
       source: 'elasticache-replication-group'
     }
@@ -168,26 +234,26 @@ test('mapReplicationGroupTargets returns primary redis endpoints', () => {
 })
 
 test('mapServerlessCacheTargets returns serverless cache endpoints', () => {
-  const targets = mapServerlessCacheTargets(JSON.stringify({
+  const targets = mapServerlessCacheTargets({
     ServerlessCaches: [
       {
-        ServerlessCacheName: 'ility-serverless',
+        ServerlessCacheName: 'ility-redis-serverless',
         Engine: 'redis',
         Endpoint: {
-          Address: 'ility-serverless.serverless.apse1.cache.amazonaws.com',
+          Address: 'ility-serverless.abc.use1.cache.amazonaws.com',
           Port: 6379
         }
       }
     ]
-  }))
+  })
 
   assert.deepEqual(targets, [
     {
-      id: 'redis-serverless:ility-serverless',
+      id: 'redis-serverless:ility-redis-serverless',
       kind: 'redis',
-      name: 'ility-serverless',
+      name: 'ility-redis-serverless',
       engine: 'redis',
-      endpoint: 'ility-serverless.serverless.apse1.cache.amazonaws.com',
+      endpoint: 'ility-serverless.abc.use1.cache.amazonaws.com',
       remotePort: 6379,
       source: 'elasticache-serverless'
     }

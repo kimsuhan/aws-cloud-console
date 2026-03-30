@@ -40,21 +40,35 @@ class FakeChildProcess extends EventEmitter {
 }
 
 test('openSession creates tracked session and forwards terminal input', async () => {
-  const spawned: { file: string | null; args: string[] | null } = { file: null, args: null }
+  const spawned: { file: string | null; args: string[] | null; env: Record<string, string> | null } = {
+    file: null,
+    args: null,
+    env: null
+  }
   const child = new FakeChildProcess()
   const manager = new SsmSessionManager({
-    spawn(file, args) {
+    spawn(file, args, env) {
       spawned.file = file
       spawned.args = args
+      spawned.env = env
       return child
     }
   })
 
   const session = await manager.openSession({
+    profileId: 'profile-1',
     profileName: 'dev-admin',
     region: 'ap-northeast-2',
     instanceId: 'i-123',
-    instanceName: 'api-server'
+    instanceName: 'api-server',
+    awsCliPath: '/opt/homebrew/bin/aws',
+    env: {
+      AWS_ACCESS_KEY_ID: 'AKIADEVADMIN',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      AWS_SESSION_TOKEN: 'token-123',
+      AWS_REGION: 'ap-northeast-2',
+      AWS_DEFAULT_REGION: 'ap-northeast-2'
+    }
   })
 
   manager.sendInput(session.id, 'ls\n')
@@ -64,8 +78,15 @@ test('openSession creates tracked session and forwards terminal input', async ()
   assert.equal(spawned.file, process.env['SHELL'] ?? '/bin/zsh')
   assert.deepEqual(spawned.args, [
     '-lc',
-    'aws --profile dev-admin --region ap-northeast-2 ssm start-session --target i-123'
+    '/opt/homebrew/bin/aws --region ap-northeast-2 ssm start-session --target i-123'
   ])
+  assert.deepEqual(spawned.env, {
+    AWS_ACCESS_KEY_ID: 'AKIADEVADMIN',
+    AWS_SECRET_ACCESS_KEY: 'secret',
+    AWS_SESSION_TOKEN: 'token-123',
+    AWS_REGION: 'ap-northeast-2',
+    AWS_DEFAULT_REGION: 'ap-northeast-2'
+  })
 })
 
 test('closeSession removes session and kills backing process', async () => {
@@ -77,10 +98,18 @@ test('closeSession removes session and kills backing process', async () => {
   })
 
   const session = await manager.openSession({
+    profileId: 'profile-1',
     profileName: 'dev-admin',
     region: 'ap-northeast-2',
     instanceId: 'i-123',
-    instanceName: 'api-server'
+    instanceName: 'api-server',
+    awsCliPath: '/opt/homebrew/bin/aws',
+    env: {
+      AWS_ACCESS_KEY_ID: 'AKIADEVADMIN',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      AWS_REGION: 'ap-northeast-2',
+      AWS_DEFAULT_REGION: 'ap-northeast-2'
+    }
   })
 
   await manager.closeSession(session.id)
