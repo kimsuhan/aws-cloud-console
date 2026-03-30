@@ -1,0 +1,21 @@
+export const ipcChannels = {
+  getAppReadiness: 'app:get-readiness',
+  listAwsProfiles: 'aws:list-profiles',
+  selectAwsProfile: 'aws:select-profile',
+  setActiveRegion: 'aws:set-region',
+  resetActiveProfile: 'aws:reset-profile',
+  listEc2Instances: 'ec2:list-instances',
+  listTunnelTargets: 'tunnel:list-targets',
+  openTunnelSession: 'tunnel:open-session',
+  closeTunnelSession: 'tunnel:close-session',
+  openSsmSession: 'ssm:open-session',
+  sendSessionInput: 'ssm:send-input',
+  resizeSession: 'ssm:resize-session',
+  closeSession: 'ssm:close-session',
+  sessionOutput: 'ssm:session-output',
+  sessionExit: 'ssm:session-exit',
+  sessionError: 'ssm:session-error',
+  tunnelLog: 'tunnel:log',
+  tunnelExit: 'tunnel:exit',
+  tunnelError: 'tunnel:error'
+} as const

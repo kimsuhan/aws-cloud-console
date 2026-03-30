@@ -1,0 +1,74 @@
+{
+  "name": "aws-cloud-console",
+  "productName": "AWS Cloud Console",
+  "version": "0.0.0",
+  "private": true,
+  "author": "Suhan Kim",
+  "description": "AWS Cloud Console powered by Electron and TypeScript",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:kimsuhan/aws-cloud-console.git"
+  },
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:mcp": "ELECTRON_REMOTE_DEBUGGING_PORT=9222 electron-vite dev",
+    "build": "electron-vite build",
+    "dist:mac": "pnpm build && electron-builder --mac dmg --publish never",
+    "preview": "electron-vite preview",
+    "test": "tsx --test src/**/*.test.ts",
+    "mcp:electron": "npx -y @ohah/electron-mcp-server"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.5.0",
+    "@types/node": "^22.15.30",
+    "electron": "^36.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.3.5"
+  },
+  "build": {
+    "appId": "com.kimsuhan.aws-cloud-console",
+    "productName": "AWS Cloud Console",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/aws-cloud.png",
+        "to": "assets/aws-cloud.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/aws-cloud.icns",
+      "target": [
+        "dmg"
+      ]
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "kimsuhan",
+      "repo": "aws-cloud-console"
+    }
+  }
+}
