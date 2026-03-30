@@ -16,7 +16,7 @@ interface PtyLikeProcess {
 }
 
 interface ProcessSpawner {
-  spawn(file: string, args: string[]): PtyLikeProcess
+  spawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess
 }
 
 interface ReconnectHandle {
@@ -28,6 +28,7 @@ interface ReconnectScheduler {
 }
 
 interface OpenTunnelSessionOptions {
+  profileId: string
   profileName: string
   region: string
   jumpInstanceId: string
@@ -37,6 +38,8 @@ interface OpenTunnelSessionOptions {
   targetEndpoint: string
   remotePort: number
   localPort: number
+  awsCliPath: string
+  env: Record<string, string>
 }
 
 interface TunnelSessionRecord {
@@ -51,6 +54,10 @@ function createSessionId(): string {
   return `tunnel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function shellQuote(value: string): string {
+  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value
+}
+
 function buildTunnelCommand(options: OpenTunnelSessionOptions): { file: string; args: string[] } {
   const shell = process.env['SHELL'] ?? '/bin/zsh'
   const parameters = JSON.stringify({
@@ -63,18 +70,21 @@ function buildTunnelCommand(options: OpenTunnelSessionOptions): { file: string; 
     file: shell,
     args: [
       '-lc',
-      `aws --profile ${options.profileName} --region ${options.region} ssm start-session --target ${options.jumpInstanceId} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '${parameters}'`
+      `${shellQuote(options.awsCliPath)} --region ${options.region} ssm start-session --target ${options.jumpInstanceId} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '${parameters}'`
     ]
   }
 }
 
-function defaultSpawn(file: string, args: string[]): PtyLikeProcess {
+function defaultSpawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess {
   return spawn(file, args, {
     name: 'xterm-color',
     cols: 120,
     rows: 30,
     cwd: process.cwd(),
-    env: process.env as Record<string, string>
+    env: {
+      ...(process.env as Record<string, string>),
+      ...env
+    }
   })
 }
 
@@ -116,6 +126,7 @@ export class TunnelSessionManager extends EventEmitter {
       localPort: options.localPort,
       jumpInstanceId: options.jumpInstanceId,
       jumpInstanceName: options.jumpInstanceName,
+      profileId: options.profileId,
       profileName: options.profileName,
       region: options.region,
       status: 'connecting',
@@ -128,7 +139,7 @@ export class TunnelSessionManager extends EventEmitter {
 
   #startProcess(id: string, session: TunnelSessionState, options: OpenTunnelSessionOptions): void {
     const command = buildTunnelCommand(options)
-    const process = this.#processSpawner.spawn(command.file, command.args)
+    const process = this.#processSpawner.spawn(command.file, command.args, options.env)
     const record: TunnelSessionRecord = {
       session,
       process,

@@ -5,10 +5,13 @@ import { spawn } from 'node-pty'
 import type { SessionTabState } from '../shared/contracts'
 
 export interface OpenSessionOptions {
+  profileId: string
   profileName: string
   region: string
   instanceId: string
   instanceName: string
+  awsCliPath: string
+  env: Record<string, string>
 }
 
 interface SessionRecord {
@@ -28,7 +31,11 @@ interface PtyLikeProcess {
 }
 
 interface ProcessSpawner {
-  spawn(file: string, args: string[]): PtyLikeProcess
+  spawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess
+}
+
+function shellQuote(value: string): string {
+  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value
 }
 
 function createSessionId(): string {
@@ -40,20 +47,20 @@ function buildSsmCommand(options: OpenSessionOptions): { file: string; args: str
 
   return {
     file: shell,
-    args: [
-      '-lc',
-      `aws --profile ${options.profileName} --region ${options.region} ssm start-session --target ${options.instanceId}`
-    ]
+    args: ['-lc', `${shellQuote(options.awsCliPath)} --region ${options.region} ssm start-session --target ${options.instanceId}`]
   }
 }
 
-function defaultSpawn(file: string, args: string[]): PtyLikeProcess {
+function defaultSpawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess {
   return spawn(file, args, {
     name: 'xterm-color',
     cols: 120,
     rows: 30,
     cwd: process.cwd(),
-    env: process.env as Record<string, string>
+    env: {
+      ...(process.env as Record<string, string>),
+      ...env
+    }
   })
 }
 
@@ -70,12 +77,13 @@ export class SsmSessionManager extends EventEmitter {
     const id = createSessionId()
     const command = buildSsmCommand(options)
 
-    const child = this.#processSpawner.spawn(command.file, command.args)
+    const child = this.#processSpawner.spawn(command.file, command.args, options.env)
     const session: SessionTabState = {
       id,
       title: options.instanceName,
       instanceId: options.instanceId,
       instanceName: options.instanceName,
+      profileId: options.profileId,
       profileName: options.profileName,
       region: options.region,
       status: 'connecting',

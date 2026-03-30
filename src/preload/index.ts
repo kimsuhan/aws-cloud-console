@@ -1,13 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 import type {
-  ActiveProfileState,
   AppReadinessState,
+  AppProfileSummary,
+  CreateProfileRequest,
   Ec2InstanceSummary,
   ElectronApi,
+  LegacyImportResult,
   OpenTunnelSessionRequest,
   OpenSessionRequest,
-  ProfileSummary,
   SessionErrorEvent,
   SessionExitEvent,
   SessionOutputEvent,
@@ -18,7 +19,10 @@ import type {
   TunnelKind,
   TunnelLogEvent,
   TunnelSessionState,
-  TunnelTargetSummary
+  TunnelTargetSummary,
+  RuntimeConfigState,
+  UpdateProfileRequest,
+  UpdateRuntimePathsRequest
 } from '../shared/contracts'
 import { ipcChannels } from '../main/ipc'
 
@@ -36,12 +40,21 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const electronApi: ElectronApi = {
   getAppReadiness: () => ipcRenderer.invoke(ipcChannels.getAppReadiness) as Promise<AppReadinessState>,
-  listAwsProfiles: () => ipcRenderer.invoke(ipcChannels.listAwsProfiles) as Promise<ProfileSummary[]>,
-  selectAwsProfile: (profileName: string) =>
-    ipcRenderer.invoke(ipcChannels.selectAwsProfile, profileName) as Promise<ActiveProfileState>,
-  setActiveRegion: (region: string) =>
-    ipcRenderer.invoke(ipcChannels.setActiveRegion, region) as Promise<ActiveProfileState>,
-  resetActiveProfile: () => ipcRenderer.invoke(ipcChannels.resetActiveProfile),
+  listProfiles: () => ipcRenderer.invoke(ipcChannels.listProfiles) as Promise<AppProfileSummary[]>,
+  createProfile: (request: CreateProfileRequest) =>
+    ipcRenderer.invoke(ipcChannels.createProfile, request) as Promise<AppProfileSummary>,
+  updateProfile: (request: UpdateProfileRequest) =>
+    ipcRenderer.invoke(ipcChannels.updateProfile, request) as Promise<AppProfileSummary>,
+  deleteProfile: (profileId: string) => ipcRenderer.invoke(ipcChannels.deleteProfile, profileId),
+  selectActiveProfile: (profileId: string) =>
+    ipcRenderer.invoke(ipcChannels.selectActiveProfile, profileId) as Promise<AppProfileSummary>,
+  setDefaultProfile: (profileId: string) =>
+    ipcRenderer.invoke(ipcChannels.setDefaultProfile, profileId) as Promise<AppProfileSummary>,
+  getRuntimeConfig: () => ipcRenderer.invoke(ipcChannels.getRuntimeConfig) as Promise<RuntimeConfigState>,
+  updateRuntimePaths: (request: UpdateRuntimePathsRequest) =>
+    ipcRenderer.invoke(ipcChannels.updateRuntimePaths, request) as Promise<RuntimeConfigState>,
+  importLegacyProfiles: () => ipcRenderer.invoke(ipcChannels.importLegacyProfiles) as Promise<LegacyImportResult>,
+  dismissLegacyImport: () => ipcRenderer.invoke(ipcChannels.dismissLegacyImport),
   listEc2Instances: () => ipcRenderer.invoke(ipcChannels.listEc2Instances) as Promise<Ec2InstanceSummary[]>,
   listTunnelTargets: (kind: TunnelKind) =>
     ipcRenderer.invoke(ipcChannels.listTunnelTargets, kind) as Promise<TunnelTargetSummary[]>,

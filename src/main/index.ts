@@ -1,31 +1,37 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import type {
-  ActiveProfileState,
+  AppProfileSummary,
   AppReadinessState,
+  CreateProfileRequest,
   OpenTunnelSessionRequest,
   OpenSessionRequest,
+  RuntimeConfigState,
   SessionErrorEvent,
   SessionExitEvent,
   SessionOutputEvent,
   TunnelErrorEvent,
   TunnelExitEvent,
   TunnelKind,
-  TunnelLogEvent
+  TunnelLogEvent,
+  UpdateProfileRequest,
+  UpdateRuntimePathsRequest
 } from '../shared/contracts'
-import { listCredentialProfiles, resolveProfileRegion } from './aws-config'
+import { listCredentialProfiles } from './aws-config'
 import { detectDependencies } from './dependencies'
 import { listEc2Instances } from './ec2-client'
 import { ipcChannels } from './ipc'
+import { AppProfileStore } from './profile-store'
+import { buildExecutionContext } from './runtime-context'
 import { SsmSessionManager } from './ssm-session-manager'
 import { TunnelSessionManager } from './tunnel-session-manager'
 import { listTunnelTargets } from './tunnel-targets'
 
 let mainWindow: BrowserWindow | null = null
-let activeProfile: ActiveProfileState | null = null
+let profileStore: AppProfileStore | null = null
 
 const sessionManager = new SsmSessionManager()
 const tunnelSessionManager = new TunnelSessionManager()
@@ -33,6 +39,18 @@ const remoteDebuggingPort = process.env['ELECTRON_REMOTE_DEBUGGING_PORT']
 
 if (remoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort)
+}
+
+function getProfileStore(): AppProfileStore {
+  if (!profileStore) {
+    throw new Error('Profile store is unavailable before app startup.')
+  }
+
+  return profileStore
+}
+
+function toProfileSummary(profile: AppProfileSummary): AppProfileSummary {
+  return profile
 }
 
 function awsFilePath(filename: 'credentials' | 'config'): string {
@@ -51,66 +69,66 @@ async function readOptionalFile(filePath: string): Promise<string> {
   }
 }
 
-async function loadAwsProfiles(): Promise<string[]> {
-  return listCredentialProfiles(await readOptionalFile(awsFilePath('credentials')))
+async function listStoredProfiles(): Promise<AppProfileSummary[]> {
+  return (await getProfileStore().listProfiles()).map(toProfileSummary)
+}
+
+async function getRuntimeConfig(): Promise<RuntimeConfigState> {
+  const settings = await getProfileStore().getRuntimeSettings()
+  return {
+    awsCliPath: settings.awsCliPath,
+    sessionManagerPluginPath: settings.sessionManagerPluginPath
+  }
+}
+
+async function hasLegacyProfiles(): Promise<boolean> {
+  const settings = await getProfileStore().getRuntimeSettings()
+  if (settings.legacyImportDismissedAt) {
+    return false
+  }
+
+  const credentialsContent = await readOptionalFile(awsFilePath('credentials'))
+  return listCredentialProfiles(credentialsContent).length > 0
 }
 
 async function getAppReadiness(): Promise<AppReadinessState> {
-  const [dependencyStatus, profiles] = await Promise.all([detectDependencies(), loadAwsProfiles()])
+  const [profiles, activeProfile, runtimeConfig, canImportLegacyProfiles] = await Promise.all([
+    listStoredProfiles(),
+    getProfileStore().getActiveProfileCredentials(),
+    getRuntimeConfig(),
+    hasLegacyProfiles()
+  ])
+  const dependencyStatus = await detectDependencies(runtimeConfig)
 
   return {
     dependencyStatus,
-    profiles: profiles.map((name) => ({ name })),
-    activeProfile
+    profiles,
+    activeProfile: activeProfile?.profile ?? null,
+    runtimeConfig,
+    needsProfileSetup: profiles.length === 0,
+    needsDependencySetup: !dependencyStatus.awsCli.installed || !dependencyStatus.sessionManagerPlugin.installed,
+    canImportLegacyProfiles: profiles.length === 0 && canImportLegacyProfiles
   }
 }
 
-async function selectAwsProfile(profileName: string): Promise<ActiveProfileState> {
-  const profiles = await loadAwsProfiles()
-
-  if (!profiles.includes(profileName)) {
-    throw new Error(`Profile "${profileName}" was not found in ~/.aws/credentials.`)
-  }
-
-  const configContent = await readOptionalFile(awsFilePath('config'))
-  const region = resolveProfileRegion(profileName, configContent)
-
-  if (!region) {
-    throw new Error(`Profile "${profileName}" does not have a region in ~/.aws/config.`)
-  }
-
-  await sessionManager.closeAllSessions()
-  activeProfile = {
-    profileName,
-    region
-  }
-
-  return activeProfile
-}
-
-async function setActiveRegion(region: string): Promise<ActiveProfileState> {
-  const profile = requireActiveProfile()
-
-  activeProfile = {
-    ...profile,
-    region
-  }
-
-  return activeProfile
-}
-
-async function resetActiveProfile(): Promise<void> {
+async function resetWorkspaceState(): Promise<void> {
   await sessionManager.closeAllSessions()
   await tunnelSessionManager.closeAllTunnelSessions()
-  activeProfile = null
 }
 
-function requireActiveProfile(): ActiveProfileState {
+async function requireActiveProfileCredentials() {
+  const activeProfile = await getProfileStore().getActiveProfileCredentials()
   if (!activeProfile) {
-    throw new Error('Select an AWS profile before running actions.')
+    throw new Error('Create or select an app-managed AWS profile before running actions.')
   }
 
   return activeProfile
+}
+
+async function requireExecutionContext() {
+  const activeProfile = await requireActiveProfileCredentials()
+  const dependencyStatus = await detectDependencies(await getRuntimeConfig())
+  return buildExecutionContext(activeProfile, dependencyStatus)
 }
 
 function emitToRenderer<T>(channel: string, payload: T): void {
@@ -149,40 +167,94 @@ function registerSessionEvents(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle(ipcChannels.getAppReadiness, () => getAppReadiness())
-  ipcMain.handle(ipcChannels.listAwsProfiles, async () => (await loadAwsProfiles()).map((name) => ({ name })))
-  ipcMain.handle(ipcChannels.selectAwsProfile, (_event, profileName: string) => selectAwsProfile(profileName))
-  ipcMain.handle(ipcChannels.setActiveRegion, (_event, region: string) => setActiveRegion(region))
-  ipcMain.handle(ipcChannels.resetActiveProfile, async () => resetActiveProfile())
-  ipcMain.handle(ipcChannels.listEc2Instances, async () => listEc2Instances(requireActiveProfile()))
+  ipcMain.handle(ipcChannels.listProfiles, () => listStoredProfiles())
+  ipcMain.handle(ipcChannels.createProfile, async (_event, request: CreateProfileRequest) => {
+    const profile = await getProfileStore().createProfile(request)
+    await resetWorkspaceState()
+    return toProfileSummary(profile)
+  })
+  ipcMain.handle(ipcChannels.updateProfile, async (_event, request: UpdateProfileRequest) => {
+    const profile = await getProfileStore().updateProfile(request.id, request)
+    const activeProfile = await getProfileStore().getActiveProfileCredentials()
+    if (activeProfile?.profile.id === request.id) {
+      await resetWorkspaceState()
+    }
+    return toProfileSummary(profile)
+  })
+  ipcMain.handle(ipcChannels.deleteProfile, async (_event, profileId: string) => {
+    const activeProfile = await getProfileStore().getActiveProfileCredentials()
+    await getProfileStore().deleteProfile(profileId)
+    if (activeProfile?.profile.id === profileId) {
+      await resetWorkspaceState()
+    }
+  })
+  ipcMain.handle(ipcChannels.selectActiveProfile, async (_event, profileId: string) => {
+    const profile = await getProfileStore().selectActiveProfile(profileId)
+    await resetWorkspaceState()
+    return toProfileSummary(profile)
+  })
+  ipcMain.handle(ipcChannels.setDefaultProfile, async (_event, profileId: string) => {
+    const profile = await getProfileStore().setDefaultProfile(profileId)
+    await resetWorkspaceState()
+    return toProfileSummary(profile)
+  })
+  ipcMain.handle(ipcChannels.getRuntimeConfig, () => getRuntimeConfig())
+  ipcMain.handle(ipcChannels.updateRuntimePaths, async (_event, request: UpdateRuntimePathsRequest) => {
+    const settings = await getProfileStore().updateRuntimeSettings(request)
+    return {
+      awsCliPath: settings.awsCliPath,
+      sessionManagerPluginPath: settings.sessionManagerPluginPath
+    }
+  })
+  ipcMain.handle(ipcChannels.importLegacyProfiles, async () => {
+    const result = await getProfileStore().importLegacyProfiles({
+      credentialsContent: await readOptionalFile(awsFilePath('credentials')),
+      configContent: await readOptionalFile(awsFilePath('config'))
+    })
+    await resetWorkspaceState()
+    return result
+  })
+  ipcMain.handle(ipcChannels.dismissLegacyImport, async () => {
+    await getProfileStore().updateRuntimeSettings({
+      legacyImportDismissedAt: new Date().toISOString()
+    })
+  })
+  ipcMain.handle(ipcChannels.listEc2Instances, async () => listEc2Instances(await requireActiveProfileCredentials()))
   ipcMain.handle(ipcChannels.listTunnelTargets, async (_event, kind: TunnelKind) =>
-    listTunnelTargets(requireActiveProfile(), kind)
+    listTunnelTargets(await requireActiveProfileCredentials(), kind)
   )
   ipcMain.handle(ipcChannels.openTunnelSession, async (_event, request: OpenTunnelSessionRequest) => {
-    const profile = requireActiveProfile()
+    const context = await requireExecutionContext()
 
     return tunnelSessionManager.openTunnelSession({
-      profileName: profile.profileName,
-      region: profile.region,
+      profileId: context.profile.id,
+      profileName: context.profile.name,
+      region: context.profile.region,
       jumpInstanceId: request.jumpInstanceId,
       jumpInstanceName: request.jumpInstanceName,
       targetName: request.targetName,
       targetKind: request.targetKind,
       targetEndpoint: request.targetEndpoint,
       remotePort: request.remotePort,
-      localPort: request.localPort
+      localPort: request.localPort,
+      awsCliPath: context.awsCliPath,
+      env: context.env
     })
   })
   ipcMain.handle(ipcChannels.closeTunnelSession, async (_event, sessionId: string) =>
     tunnelSessionManager.closeTunnelSession(sessionId)
   )
   ipcMain.handle(ipcChannels.openSsmSession, async (_event, request: OpenSessionRequest) => {
-    const profile = requireActiveProfile()
+    const context = await requireExecutionContext()
 
     return sessionManager.openSession({
-      profileName: profile.profileName,
-      region: profile.region,
+      profileId: context.profile.id,
+      profileName: context.profile.name,
+      region: context.profile.region,
       instanceId: request.instanceId,
-      instanceName: request.instanceName
+      instanceName: request.instanceName,
+      awsCliPath: context.awsCliPath,
+      env: context.env
     })
   })
   ipcMain.handle(ipcChannels.sendSessionInput, async (_event, sessionId: string, data: string) => {
@@ -228,6 +300,11 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  profileStore = new AppProfileStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage
+  })
+
   registerSessionEvents()
   registerIpcHandlers()
   mainWindow = createWindow()

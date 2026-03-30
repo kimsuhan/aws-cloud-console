@@ -1,4 +1,4 @@
-function parseIniSections(content: string): Map<string, Map<string, string>> {
+export function parseIniSections(content: string): Map<string, Map<string, string>> {
   const sections = new Map<string, Map<string, string>>()
   let currentSection: Map<string, string> | null = null
 

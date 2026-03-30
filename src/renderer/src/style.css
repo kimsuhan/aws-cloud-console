@@ -92,6 +92,12 @@ p {
   border: 1px solid var(--border);
 }
 
+.profile-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
 .profile-button {
   appearance: none;
   border: 0;
@@ -540,6 +546,14 @@ p {
 .tunnel-builder-actions {
   padding: 16px;
   border-top: 1px solid var(--border);
+}
+
+.tunnel-target-row .tunnel-builder-actions {
+  padding: 0;
+  border-top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .tunnel-status-panel {

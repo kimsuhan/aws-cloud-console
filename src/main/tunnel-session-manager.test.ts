@@ -41,11 +41,16 @@ class FakeTunnelProcess extends EventEmitter {
 
 test('openTunnelSession spawns the AWS port forwarding command through the shell', async () => {
   const process = new FakeTunnelProcess()
-  const spawned: { file: string | null; args: string[] | null } = { file: null, args: null }
+  const spawned: { file: string | null; args: string[] | null; env: Record<string, string> | null } = {
+    file: null,
+    args: null,
+    env: null
+  }
   const manager = new TunnelSessionManager({
-    spawn(file, args) {
+    spawn(file, args, env) {
       spawned.file = file
       spawned.args = args
+      spawned.env = env
       return process
     },
     scheduleReconnect() {
@@ -56,6 +61,7 @@ test('openTunnelSession spawns the AWS port forwarding command through the shell
   })
 
   const session = await manager.openTunnelSession({
+    profileId: 'profile-1',
     profileName: 'ility',
     region: 'ap-southeast-1',
     jumpInstanceId: 'i-bastion',
@@ -64,14 +70,27 @@ test('openTunnelSession spawns the AWS port forwarding command through the shell
     targetKind: 'db',
     targetEndpoint: 'ility-db.abc.apse1.rds.amazonaws.com',
     remotePort: 5432,
-    localPort: 54320
+    localPort: 54320,
+    awsCliPath: '/opt/homebrew/bin/aws',
+    env: {
+      AWS_ACCESS_KEY_ID: 'AKIAILITY',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      AWS_REGION: 'ap-southeast-1',
+      AWS_DEFAULT_REGION: 'ap-southeast-1'
+    }
   })
 
   assert.equal(spawned.file, '/bin/zsh')
   assert.deepEqual(spawned.args, [
     '-lc',
-    'aws --profile ility --region ap-southeast-1 ssm start-session --target i-bastion --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters \'{"host":["ility-db.abc.apse1.rds.amazonaws.com"],"portNumber":["5432"],"localPortNumber":["54320"]}\''
+    '/opt/homebrew/bin/aws --region ap-southeast-1 ssm start-session --target i-bastion --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters \'{"host":["ility-db.abc.apse1.rds.amazonaws.com"],"portNumber":["5432"],"localPortNumber":["54320"]}\''
   ])
+  assert.deepEqual(spawned.env, {
+    AWS_ACCESS_KEY_ID: 'AKIAILITY',
+    AWS_SECRET_ACCESS_KEY: 'secret',
+    AWS_REGION: 'ap-southeast-1',
+    AWS_DEFAULT_REGION: 'ap-southeast-1'
+  })
   assert.equal(session.localPort, 54320)
   assert.equal(session.targetName, 'ility-db')
 })
@@ -90,6 +109,7 @@ test('closeTunnelSession kills the process and removes the session', async () =>
   })
 
   const session = await manager.openTunnelSession({
+    profileId: 'profile-1',
     profileName: 'ility',
     region: 'ap-southeast-1',
     jumpInstanceId: 'i-bastion',
@@ -98,7 +118,14 @@ test('closeTunnelSession kills the process and removes the session', async () =>
     targetKind: 'db',
     targetEndpoint: 'ility-db.abc.apse1.rds.amazonaws.com',
     remotePort: 5432,
-    localPort: 54320
+    localPort: 54320,
+    awsCliPath: '/opt/homebrew/bin/aws',
+    env: {
+      AWS_ACCESS_KEY_ID: 'AKIAILITY',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      AWS_REGION: 'ap-southeast-1',
+      AWS_DEFAULT_REGION: 'ap-southeast-1'
+    }
   })
 
   await manager.closeTunnelSession(session.id)
