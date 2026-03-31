@@ -54,12 +54,7 @@ function createSessionId(): string {
   return `tunnel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-function shellQuote(value: string): string {
-  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value
-}
-
 function buildTunnelCommand(options: OpenTunnelSessionOptions): { file: string; args: string[] } {
-  const shell = process.env['SHELL'] ?? '/bin/zsh'
   const parameters = JSON.stringify({
     host: [options.targetEndpoint],
     portNumber: [String(options.remotePort)],
@@ -67,10 +62,18 @@ function buildTunnelCommand(options: OpenTunnelSessionOptions): { file: string; 
   })
 
   return {
-    file: shell,
+    file: options.awsCliPath,
     args: [
-      '-lc',
-      `${shellQuote(options.awsCliPath)} --region ${options.region} ssm start-session --target ${options.jumpInstanceId} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '${parameters}'`
+      '--region',
+      options.region,
+      'ssm',
+      'start-session',
+      '--target',
+      options.jumpInstanceId,
+      '--document-name',
+      'AWS-StartPortForwardingSessionToRemoteHost',
+      '--parameters',
+      parameters
     ]
   }
 }

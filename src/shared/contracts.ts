@@ -107,6 +107,8 @@ export interface SessionErrorEvent {
 export interface OpenSessionRequest {
   instanceId: string
   instanceName: string
+  cols: number
+  rows: number
 }
 
 export interface SessionResizeRequest {

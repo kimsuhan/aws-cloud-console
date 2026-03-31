@@ -39,7 +39,7 @@ class FakeTunnelProcess extends EventEmitter {
   }
 }
 
-test('openTunnelSession spawns the AWS port forwarding command through the shell', async () => {
+test('openTunnelSession spawns the AWS port forwarding command directly', async () => {
   const process = new FakeTunnelProcess()
   const spawned: { file: string | null; args: string[] | null; env: Record<string, string> | null } = {
     file: null,
@@ -80,10 +80,18 @@ test('openTunnelSession spawns the AWS port forwarding command through the shell
     }
   })
 
-  assert.equal(spawned.file, '/bin/zsh')
+  assert.equal(spawned.file, '/opt/homebrew/bin/aws')
   assert.deepEqual(spawned.args, [
-    '-lc',
-    '/opt/homebrew/bin/aws --region ap-southeast-1 ssm start-session --target i-bastion --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters \'{"host":["ility-db.abc.apse1.rds.amazonaws.com"],"portNumber":["5432"],"localPortNumber":["54320"]}\''
+    '--region',
+    'ap-southeast-1',
+    'ssm',
+    'start-session',
+    '--target',
+    'i-bastion',
+    '--document-name',
+    'AWS-StartPortForwardingSessionToRemoteHost',
+    '--parameters',
+    '{"host":["ility-db.abc.apse1.rds.amazonaws.com"],"portNumber":["5432"],"localPortNumber":["54320"]}'
   ])
   assert.deepEqual(spawned.env, {
     AWS_ACCESS_KEY_ID: 'AKIAILITY',

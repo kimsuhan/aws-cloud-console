@@ -65,6 +65,20 @@ interface RuntimePathFormState {
   sessionManagerPluginPath: string
 }
 
+function estimateInitialTerminalSize(): { cols: number; rows: number } {
+  if (typeof window === 'undefined') {
+    return { cols: 120, rows: 30 }
+  }
+
+  const estimatedWidth = Math.max(window.innerWidth - 360, 640)
+  const estimatedHeight = Math.max(window.innerHeight - 180, 320)
+
+  return {
+    cols: Math.max(80, Math.floor(estimatedWidth / 9)),
+    rows: Math.max(24, Math.floor(estimatedHeight / 22))
+  }
+}
+
 function emptyProfileForm(region = 'ap-northeast-2'): ProfileFormState {
   return {
     name: '',
@@ -136,6 +150,20 @@ export function App(): React.JSX.Element {
   const [runtimeFormError, setRuntimeFormError] = useState<string | null>(null)
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [profileManagerOpen, setProfileManagerOpen] = useState(false)
+  const sessionOpenSizeRef = useRef<{ cols: number; rows: number }>(estimateInitialTerminalSize())
+
+  useEffect(() => {
+    const updateEstimatedSize = () => {
+      sessionOpenSizeRef.current = estimateInitialTerminalSize()
+    }
+
+    updateEstimatedSize()
+    window.addEventListener('resize', updateEstimatedSize)
+
+    return () => {
+      window.removeEventListener('resize', updateEstimatedSize)
+    }
+  }, [])
 
   async function refreshReadiness(): Promise<void> {
     const nextReadiness = await window.electronAPI.getAppReadiness()
@@ -542,7 +570,9 @@ export function App(): React.JSX.Element {
     try {
       const session = await window.electronAPI.openSsmSession({
         instanceId: instance.id,
-        instanceName: instance.name
+        instanceName: instance.name,
+        cols: sessionOpenSizeRef.current.cols,
+        rows: sessionOpenSizeRef.current.rows
       })
 
       setSessionTabs((current) => [...current, { ...session, status: 'open' }])
@@ -1089,6 +1119,7 @@ export function App(): React.JSX.Element {
                 key={activeTab.id}
                 sessionId={activeTab.id}
                 initialBuffer={sessionHistoryRef.current[activeTab.id] ?? ''}
+                autoFocus
               />
             </div>
           ) : activeTunnelTab ? (

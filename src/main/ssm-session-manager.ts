@@ -10,6 +10,8 @@ export interface OpenSessionOptions {
   region: string
   instanceId: string
   instanceName: string
+  cols: number
+  rows: number
   awsCliPath: string
   env: Record<string, string>
 }
@@ -17,6 +19,8 @@ export interface OpenSessionOptions {
 interface SessionRecord {
   session: SessionTabState
   child: PtyLikeProcess
+  cols: number
+  rows: number
 }
 
 interface Disposable {
@@ -25,17 +29,14 @@ interface Disposable {
 
 interface PtyLikeProcess {
   write(data: string): void
+  resize(cols: number, rows: number): void
   onData(listener: (data: string) => void): Disposable
   onExit(listener: (event: { exitCode: number }) => void): Disposable
   kill(signal?: NodeJS.Signals | number): boolean
 }
 
 interface ProcessSpawner {
-  spawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess
-}
-
-function shellQuote(value: string): string {
-  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value
+  spawn(file: string, args: string[], env: Record<string, string>, cols: number, rows: number): PtyLikeProcess
 }
 
 function createSessionId(): string {
@@ -43,24 +44,30 @@ function createSessionId(): string {
 }
 
 function buildSsmCommand(options: OpenSessionOptions): { file: string; args: string[] } {
-  const shell = process.env['SHELL'] ?? '/bin/zsh'
-
   return {
-    file: shell,
-    args: ['-lc', `${shellQuote(options.awsCliPath)} --region ${options.region} ssm start-session --target ${options.instanceId}`]
+    file: options.awsCliPath,
+    args: ['--region', options.region, 'ssm', 'start-session', '--target', options.instanceId]
   }
 }
 
-function defaultSpawn(file: string, args: string[], env: Record<string, string>): PtyLikeProcess {
+function defaultSpawn(
+  file: string,
+  args: string[],
+  env: Record<string, string>,
+  cols: number,
+  rows: number
+): PtyLikeProcess {
+  const nextEnv = {
+    ...(process.env as Record<string, string>),
+    ...env
+  }
+
   return spawn(file, args, {
-    name: 'xterm-color',
-    cols: 120,
-    rows: 30,
+    name: nextEnv['TERM'] ?? 'xterm-256color',
+    cols,
+    rows,
     cwd: process.cwd(),
-    env: {
-      ...(process.env as Record<string, string>),
-      ...env
-    }
+    env: nextEnv
   })
 }
 
@@ -76,8 +83,12 @@ export class SsmSessionManager extends EventEmitter {
   async openSession(options: OpenSessionOptions): Promise<SessionTabState> {
     const id = createSessionId()
     const command = buildSsmCommand(options)
-
-    const child = this.#processSpawner.spawn(command.file, command.args, options.env)
+    const env = {
+      ...options.env,
+      TERM: options.env['TERM'] ?? 'xterm-256color'
+    }
+    const child = this.#processSpawner.spawn(command.file, command.args, env, options.cols, options.rows)
+    child.resize(options.cols, options.rows)
     const session: SessionTabState = {
       id,
       title: options.instanceName,
@@ -90,7 +101,12 @@ export class SsmSessionManager extends EventEmitter {
       openedAt: Date.now()
     }
 
-    this.#sessions.set(id, { session, child })
+    this.#sessions.set(id, {
+      session,
+      child,
+      cols: options.cols,
+      rows: options.rows
+    })
 
     child.onData((data) => {
       session.status = 'open'
@@ -128,8 +144,23 @@ export class SsmSessionManager extends EventEmitter {
     this.#sessions.get(sessionId)?.child.write(data)
   }
 
-  resizeSession(_sessionId: string, _cols: number, _rows: number): void {
-    // node-pty gives us a PTY-backed session, but start-session itself does not need explicit resize handling yet.
+  resizeSession(sessionId: string, cols: number, rows: number): void {
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
+      return
+    }
+
+    const record = this.#sessions.get(sessionId)
+    if (!record) {
+      return
+    }
+
+    if (record.cols === cols && record.rows === rows) {
+      return
+    }
+
+    record.cols = cols
+    record.rows = rows
+    record.child.resize(cols, rows)
   }
 
   async closeSession(sessionId: string): Promise<void> {

@@ -173,6 +173,7 @@ p {
 }
 
 .tab-row {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
@@ -241,6 +242,7 @@ p {
 }
 
 .new-tab-button {
+  position: relative;
   width: 100%;
   text-align: left;
   height: 48px;
@@ -262,6 +264,7 @@ p {
 }
 
 .new-tab-option {
+  position: relative;
   border-width: 0 0 1px;
   border-color: var(--border);
   text-align: left;

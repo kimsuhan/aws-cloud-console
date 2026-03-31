@@ -25,7 +25,17 @@ import { detectDependencies } from './dependencies'
 import { listEc2Instances } from './ec2-client'
 import { ipcChannels } from './ipc'
 import { AppProfileStore } from './profile-store'
+import { registerRendererProtocol } from './renderer-protocol'
 import { buildExecutionContext } from './runtime-context'
+import {
+  shouldEnableRemoteDebugging,
+  validateAwsRegion,
+  validateCreateProfileRequest,
+  validateOpenSessionRequest,
+  validateOpenTunnelSessionRequest,
+  validateUpdateProfileRequest,
+  validateUpdateRuntimePathsRequest
+} from './security'
 import { SsmSessionManager } from './ssm-session-manager'
 import { TunnelSessionManager } from './tunnel-session-manager'
 import { listTunnelTargets } from './tunnel-targets'
@@ -35,7 +45,12 @@ let profileStore: AppProfileStore | null = null
 
 const sessionManager = new SsmSessionManager()
 const tunnelSessionManager = new TunnelSessionManager()
-const remoteDebuggingPort = process.env['ELECTRON_REMOTE_DEBUGGING_PORT']
+const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+const remoteDebuggingPort = shouldEnableRemoteDebugging({
+  remoteDebuggingPort: process.env['ELECTRON_REMOTE_DEBUGGING_PORT'],
+  isPackaged: app.isPackaged,
+  rendererUrl
+})
 
 if (remoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort)
@@ -122,6 +137,7 @@ async function requireActiveProfileCredentials() {
     throw new Error('Create or select an app-managed AWS profile before running actions.')
   }
 
+  validateAwsRegion(activeProfile.profile.region)
   return activeProfile
 }
 
@@ -169,12 +185,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(ipcChannels.getAppReadiness, () => getAppReadiness())
   ipcMain.handle(ipcChannels.listProfiles, () => listStoredProfiles())
   ipcMain.handle(ipcChannels.createProfile, async (_event, request: CreateProfileRequest) => {
-    const profile = await getProfileStore().createProfile(request)
+    const profile = await getProfileStore().createProfile(validateCreateProfileRequest(request))
     await resetWorkspaceState()
     return toProfileSummary(profile)
   })
   ipcMain.handle(ipcChannels.updateProfile, async (_event, request: UpdateProfileRequest) => {
-    const profile = await getProfileStore().updateProfile(request.id, request)
+    const profile = await getProfileStore().updateProfile(request.id, validateUpdateProfileRequest(request))
     const activeProfile = await getProfileStore().getActiveProfileCredentials()
     if (activeProfile?.profile.id === request.id) {
       await resetWorkspaceState()
@@ -200,7 +216,7 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle(ipcChannels.getRuntimeConfig, () => getRuntimeConfig())
   ipcMain.handle(ipcChannels.updateRuntimePaths, async (_event, request: UpdateRuntimePathsRequest) => {
-    const settings = await getProfileStore().updateRuntimeSettings(request)
+    const settings = await getProfileStore().updateRuntimeSettings(validateUpdateRuntimePathsRequest(request))
     return {
       awsCliPath: settings.awsCliPath,
       sessionManagerPluginPath: settings.sessionManagerPluginPath
@@ -224,19 +240,20 @@ function registerIpcHandlers(): void {
     listTunnelTargets(await requireActiveProfileCredentials(), kind)
   )
   ipcMain.handle(ipcChannels.openTunnelSession, async (_event, request: OpenTunnelSessionRequest) => {
+    const validatedRequest = validateOpenTunnelSessionRequest(request)
     const context = await requireExecutionContext()
 
     return tunnelSessionManager.openTunnelSession({
       profileId: context.profile.id,
       profileName: context.profile.name,
       region: context.profile.region,
-      jumpInstanceId: request.jumpInstanceId,
-      jumpInstanceName: request.jumpInstanceName,
-      targetName: request.targetName,
-      targetKind: request.targetKind,
-      targetEndpoint: request.targetEndpoint,
-      remotePort: request.remotePort,
-      localPort: request.localPort,
+      jumpInstanceId: validatedRequest.jumpInstanceId,
+      jumpInstanceName: validatedRequest.jumpInstanceName,
+      targetName: validatedRequest.targetName,
+      targetKind: validatedRequest.targetKind,
+      targetEndpoint: validatedRequest.targetEndpoint,
+      remotePort: validatedRequest.remotePort,
+      localPort: validatedRequest.localPort,
       awsCliPath: context.awsCliPath,
       env: context.env
     })
@@ -245,14 +262,17 @@ function registerIpcHandlers(): void {
     tunnelSessionManager.closeTunnelSession(sessionId)
   )
   ipcMain.handle(ipcChannels.openSsmSession, async (_event, request: OpenSessionRequest) => {
+    const validatedRequest = validateOpenSessionRequest(request)
     const context = await requireExecutionContext()
 
     return sessionManager.openSession({
       profileId: context.profile.id,
       profileName: context.profile.name,
       region: context.profile.region,
-      instanceId: request.instanceId,
-      instanceName: request.instanceName,
+      instanceId: validatedRequest.instanceId,
+      instanceName: validatedRequest.instanceName,
+      cols: validatedRequest.cols,
+      rows: validatedRequest.rows,
       awsCliPath: context.awsCliPath,
       env: context.env
     })
@@ -290,16 +310,17 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    void window.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  if (rendererUrl) {
+    void window.loadURL(rendererUrl)
   } else {
-    void window.loadFile(path.join(__dirname, '../renderer/index.html'))
+    void window.loadURL('app://renderer/index.html')
   }
 
   return window
 }
 
 app.whenReady().then(() => {
+  registerRendererProtocol(path.join(__dirname, '../renderer'))
   profileStore = new AppProfileStore({
     userDataPath: app.getPath('userData'),
     safeStorage
