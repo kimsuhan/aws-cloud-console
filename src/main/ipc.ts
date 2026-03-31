@@ -10,6 +10,8 @@ export const ipcChannels = {
   updateRuntimePaths: 'runtime:update-paths',
   importLegacyProfiles: 'profiles:import-legacy',
   dismissLegacyImport: 'profiles:dismiss-legacy-import',
+  acknowledgeKeychainAccessNotice: 'profiles:acknowledge-keychain-access-notice',
+  resetAppData: 'profiles:reset-app-data',
   listEc2Instances: 'ec2:list-instances',
   listTunnelTargets: 'tunnel:list-targets',
   openTunnelSession: 'tunnel:open-session',

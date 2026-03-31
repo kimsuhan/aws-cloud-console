@@ -21,16 +21,9 @@ import type {
   UpdateRuntimePathsRequest
 } from '@shared/contracts'
 
+import { findRegionOption } from './region-catalog'
+import { RegionPicker } from './components/RegionPicker'
 import { SessionTerminal } from './components/SessionTerminal'
-
-const regionOptions = [
-  'ap-northeast-2',
-  'ap-southeast-1',
-  'ap-southeast-2',
-  'us-east-1',
-  'us-west-2',
-  'eu-west-1'
-]
 
 const actionDefinitions: Array<{ id: ActionId; label: string; description: string }> = [
   {
@@ -150,6 +143,8 @@ export function App(): React.JSX.Element {
   const [runtimeFormError, setRuntimeFormError] = useState<string | null>(null)
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [profileManagerOpen, setProfileManagerOpen] = useState(false)
+  const [resetAppDataConfirmVisible, setResetAppDataConfirmVisible] = useState(false)
+  const [resetAppDataConfirmationText, setResetAppDataConfirmationText] = useState('')
   const sessionOpenSizeRef = useRef<{ cols: number; rows: number }>(estimateInitialTerminalSize())
 
   useEffect(() => {
@@ -533,6 +528,42 @@ export function App(): React.JSX.Element {
     await refreshReadiness()
   }
 
+  async function handleAcknowledgeKeychainAccessNotice(): Promise<void> {
+    setSelectionError(null)
+
+    try {
+      await window.electronAPI.acknowledgeKeychainAccessNotice()
+      await refreshReadiness()
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  function beginResetAppData(): void {
+    setSelectionError(null)
+    setResetAppDataConfirmationText('')
+    setResetAppDataConfirmVisible(true)
+  }
+
+  async function handleResetAppData(): Promise<void> {
+    setSelectionError(null)
+
+    try {
+      if (resetAppDataConfirmationText !== 'RESET') {
+        return
+      }
+
+      await window.electronAPI.resetAppData()
+      setResetAppDataConfirmVisible(false)
+      setResetAppDataConfirmationText('')
+      setProfileManagerOpen(false)
+      resetWorkspaceState()
+      await refreshReadiness()
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   async function handleSaveRuntimePaths(): Promise<void> {
     setRuntimeFormError(null)
 
@@ -599,25 +630,6 @@ export function App(): React.JSX.Element {
       jumpInstanceId: null,
       localPort: ''
     })
-  }
-
-  async function handleRegionChange(region: string): Promise<void> {
-    if (!readiness?.activeProfile) {
-      return
-    }
-
-    try {
-      await window.electronAPI.updateProfile({
-        id: readiness.activeProfile.id,
-        name: readiness.activeProfile.name,
-        region
-      })
-      resetWorkspaceState()
-      await refreshReadiness()
-      setSelectedAction('ec2-ssm-connect')
-    } catch (error) {
-      setInstancesError(error instanceof Error ? error.message : String(error))
-    }
   }
 
   async function handleCloseTab(sessionId: string): Promise<void> {
@@ -723,6 +735,7 @@ export function App(): React.JSX.Element {
   }
 
   const missingDependencies = missingDependencyMessage(readiness)
+  const activeRegionDisplay = findRegionOption(readiness.activeProfile?.region ?? '')
 
   if (readiness.profiles.length === 0) {
     return (
@@ -753,17 +766,10 @@ export function App(): React.JSX.Element {
               placeholder="profile name"
               value={profileForm.name}
             />
-            <select
-              className="region-select"
-              onChange={(event) => setProfileForm((current) => ({ ...current, region: event.target.value }))}
+            <RegionPicker
               value={profileForm.region}
-            >
-              {regionOptions.map((region) => (
-                <option key={region} value={region}>
-                  {region}
-                </option>
-              ))}
-            </select>
+              onChange={(region) => setProfileForm((current) => ({ ...current, region }))}
+            />
             <input
               className="tunnel-input"
               onChange={(event) => setProfileForm((current) => ({ ...current, accessKeyId: event.target.value }))}
@@ -836,6 +842,38 @@ export function App(): React.JSX.Element {
                 {profile.name}
               </button>
             ))}
+          </div>
+        </section>
+      </main>
+    )
+  }
+
+  if (readiness.needsKeychainAccessNotice) {
+    return (
+      <main className="gate-layout">
+        <section className="gate-card">
+          <p className="eyebrow">Secure Access</p>
+          <h1>Why the app asks for secure storage access</h1>
+          <p className="body">
+            Your AWS credentials are stored encrypted in the system secure storage. When you continue, the app may ask
+            for keychain access the first time it needs to use the active profile.
+          </p>
+          <p className="body">
+            This is expected for EC2 queries, tunnel target discovery, and SSM session launches. The app does not need
+            to unlock credentials just to render the startup screen.
+          </p>
+
+          {selectionError ? (
+            <div className="callout callout-error">
+              <strong>Secure storage setup failed.</strong>
+              <p>{selectionError}</p>
+            </div>
+          ) : null}
+
+          <div className="tunnel-builder-actions">
+            <button className="new-tab-button" onClick={() => void handleAcknowledgeKeychainAccessNotice()} type="button">
+              [ Continue ]
+            </button>
           </div>
         </section>
       </main>
@@ -1049,17 +1087,10 @@ export function App(): React.JSX.Element {
                       placeholder="profile name"
                       value={profileForm.name}
                     />
-                    <select
-                      className="region-select"
-                      onChange={(event) => setProfileForm((current) => ({ ...current, region: event.target.value }))}
+                    <RegionPicker
                       value={profileForm.region}
-                    >
-                      {regionOptions.map((region) => (
-                        <option key={region} value={region}>
-                          {region}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(region) => setProfileForm((current) => ({ ...current, region }))}
+                    />
                     <input
                       className="tunnel-input"
                       onChange={(event) =>
@@ -1095,6 +1126,50 @@ export function App(): React.JSX.Element {
                       new profile
                     </button>
                   </div>
+                </div>
+
+                <div className="tunnel-builder-section">
+                  <span className="summary-label">reset app data</span>
+                  <div className="empty-card">
+                    <strong>Delete all local app data</strong>
+                    <p>Remove all stored profiles, encrypted credentials, and local app settings from this Mac.</p>
+                  </div>
+                  {resetAppDataConfirmVisible ? (
+                    <div className="profile-form">
+                      <input
+                        className="tunnel-input"
+                        onChange={(event) => setResetAppDataConfirmationText(event.target.value)}
+                        placeholder="Type RESET to confirm"
+                        value={resetAppDataConfirmationText}
+                      />
+                      <div className="tunnel-builder-actions">
+                        <button
+                          className="toolbar-button"
+                          disabled={resetAppDataConfirmationText !== 'RESET'}
+                          onClick={() => void handleResetAppData()}
+                          type="button"
+                        >
+                          confirm reset app data
+                        </button>
+                        <button
+                          className="toolbar-button"
+                          onClick={() => {
+                            setResetAppDataConfirmVisible(false)
+                            setResetAppDataConfirmationText('')
+                          }}
+                          type="button"
+                        >
+                          cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="tunnel-builder-actions">
+                      <button className="toolbar-button" onClick={() => beginResetAppData()} type="button">
+                        reset app data
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1360,19 +1435,9 @@ export function App(): React.JSX.Element {
           </div>
 
           <div className="status-group status-controls">
-            <select
-              className="region-select"
-              onChange={(event) => {
-                void handleRegionChange(event.target.value)
-              }}
-              value={readiness.activeProfile.region}
-            >
-              {regionOptions.map((region) => (
-                <option key={region} value={region}>
-                  {region}
-                </option>
-              ))}
-            </select>
+            <span className="sidebar-label">
+              {activeRegionDisplay ? `${activeRegionDisplay.group} · ${activeRegionDisplay.city}` : readiness.activeProfile.region}
+            </span>
             <button
               className="profile-reset"
               onClick={() => {

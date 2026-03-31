@@ -21,6 +21,7 @@ import type {
   UpdateRuntimePathsRequest
 } from '../shared/contracts'
 import { listCredentialProfiles } from './aws-config'
+import { buildAppReadinessState } from './app-readiness'
 import { detectDependencies } from './dependencies'
 import { listEc2Instances } from './ec2-client'
 import { ipcChannels } from './ipc'
@@ -107,23 +108,23 @@ async function hasLegacyProfiles(): Promise<boolean> {
 }
 
 async function getAppReadiness(): Promise<AppReadinessState> {
-  const [profiles, activeProfile, runtimeConfig, canImportLegacyProfiles] = await Promise.all([
+  const [profiles, activeProfile, runtimeConfig, canImportLegacyProfiles, settings] = await Promise.all([
     listStoredProfiles(),
-    getProfileStore().getActiveProfileCredentials(),
+    getProfileStore().getActiveProfile(),
     getRuntimeConfig(),
-    hasLegacyProfiles()
+    hasLegacyProfiles(),
+    getProfileStore().getRuntimeSettings()
   ])
   const dependencyStatus = await detectDependencies(runtimeConfig)
 
-  return {
+  return buildAppReadinessState({
     dependencyStatus,
     profiles,
-    activeProfile: activeProfile?.profile ?? null,
+    activeProfile: activeProfile ?? null,
     runtimeConfig,
-    needsProfileSetup: profiles.length === 0,
-    needsDependencySetup: !dependencyStatus.awsCli.installed || !dependencyStatus.sessionManagerPlugin.installed,
-    canImportLegacyProfiles: profiles.length === 0 && canImportLegacyProfiles
-  }
+    canImportLegacyProfiles,
+    keychainAccessNoticeAcceptedAt: settings.keychainAccessNoticeAcceptedAt
+  })
 }
 
 async function resetWorkspaceState(): Promise<void> {
@@ -234,6 +235,13 @@ function registerIpcHandlers(): void {
     await getProfileStore().updateRuntimeSettings({
       legacyImportDismissedAt: new Date().toISOString()
     })
+  })
+  ipcMain.handle(ipcChannels.acknowledgeKeychainAccessNotice, async () => {
+    await getProfileStore().acceptKeychainAccessNotice()
+  })
+  ipcMain.handle(ipcChannels.resetAppData, async () => {
+    await getProfileStore().resetAppData()
+    await resetWorkspaceState()
   })
   ipcMain.handle(ipcChannels.listEc2Instances, async () => listEc2Instances(await requireActiveProfileCredentials()))
   ipcMain.handle(ipcChannels.listTunnelTargets, async (_event, kind: TunnelKind) =>

@@ -41,6 +41,7 @@ export interface RuntimeSettings {
   awsCliPath: string | null
   sessionManagerPluginPath: string | null
   legacyImportDismissedAt: string | null
+  keychainAccessNoticeAcceptedAt: string | null
 }
 
 export interface ActiveProfileWithCredentials {
@@ -89,7 +90,8 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   activeProfileId: null,
   awsCliPath: null,
   sessionManagerPluginPath: null,
-  legacyImportDismissedAt: null
+  legacyImportDismissedAt: null,
+  keychainAccessNoticeAcceptedAt: null
 }
 
 function emptyState(): PersistedState {
@@ -125,6 +127,17 @@ export class AppProfileStore {
   async getRuntimeSettings(): Promise<RuntimeSettings> {
     const state = await this.#readState()
     return { ...state.profilesFile.settings }
+  }
+
+  async getActiveProfile(): Promise<AppProfileRecord | null> {
+    const state = await this.#readState()
+    const activeProfileId = state.profilesFile.settings.activeProfileId
+
+    if (!activeProfileId) {
+      return null
+    }
+
+    return this.#requireProfile(state, activeProfileId)
   }
 
   async updateRuntimeSettings(settings: Partial<Omit<RuntimeSettings, 'activeProfileId'>>): Promise<RuntimeSettings> {
@@ -235,18 +248,32 @@ export class AppProfileStore {
   }
 
   async getActiveProfileCredentials(): Promise<ActiveProfileWithCredentials | null> {
-    const state = await this.#readState()
-    const activeProfileId = state.profilesFile.settings.activeProfileId
-
-    if (!activeProfileId) {
+    const profile = await this.getActiveProfile()
+    if (!profile) {
       return null
     }
 
-    const profile = this.#requireProfile(state, activeProfileId)
+    const state = await this.#readState()
     return {
       profile,
-      credentials: this.#decryptCredentials(state.secretsFile.secretsByProfileId[activeProfileId] ?? '')
+      credentials: this.#decryptCredentials(state.secretsFile.secretsByProfileId[profile.id] ?? '')
     }
+  }
+
+  async acceptKeychainAccessNotice(): Promise<void> {
+    const state = await this.#readState()
+    state.profilesFile.settings.keychainAccessNoticeAcceptedAt = this.#now().toISOString()
+    await this.#writeState(state)
+  }
+
+  async resetKeychainAccessNotice(): Promise<void> {
+    const state = await this.#readState()
+    state.profilesFile.settings.keychainAccessNoticeAcceptedAt = null
+    await this.#writeState(state)
+  }
+
+  async resetAppData(): Promise<void> {
+    await this.#writeState(emptyState())
   }
 
   async importLegacyProfiles(input: ImportLegacyProfilesInput): Promise<ImportLegacyProfilesResult> {

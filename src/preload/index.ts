@@ -55,6 +55,8 @@ const electronApi: ElectronApi = {
     ipcRenderer.invoke(ipcChannels.updateRuntimePaths, request) as Promise<RuntimeConfigState>,
   importLegacyProfiles: () => ipcRenderer.invoke(ipcChannels.importLegacyProfiles) as Promise<LegacyImportResult>,
   dismissLegacyImport: () => ipcRenderer.invoke(ipcChannels.dismissLegacyImport),
+  acknowledgeKeychainAccessNotice: () => ipcRenderer.invoke(ipcChannels.acknowledgeKeychainAccessNotice),
+  resetAppData: () => ipcRenderer.invoke(ipcChannels.resetAppData),
   listEc2Instances: () => ipcRenderer.invoke(ipcChannels.listEc2Instances) as Promise<Ec2InstanceSummary[]>,
   listTunnelTargets: (kind: TunnelKind) =>
     ipcRenderer.invoke(ipcChannels.listTunnelTargets, kind) as Promise<TunnelTargetSummary[]>,

@@ -21,6 +21,7 @@ interface StoredProfilesFile {
     awsCliPath: string | null
     sessionManagerPluginPath: string | null
     legacyImportDismissedAt: string | null
+    keychainAccessNoticeAcceptedAt: string | null
   }
 }
 
@@ -69,7 +70,8 @@ test('createProfile stores metadata separately from encrypted secrets and select
       activeProfileId: 'profile-1',
       awsCliPath: null,
       sessionManagerPluginPath: null,
-      legacyImportDismissedAt: null
+      legacyImportDismissedAt: null,
+      keychainAccessNoticeAcceptedAt: null
     })
     assert.equal(storedProfiles.profiles.length, 1)
     assert.equal(storedProfiles.profiles[0]?.name, 'dev-admin')
@@ -122,6 +124,117 @@ test('deleteProfile removes metadata and encrypted secret blob', async () => {
 
     assert.deepEqual(storedProfiles.profiles, [])
     assert.equal(storedProfiles.settings.activeProfileId, null)
+    assert.deepEqual(storedSecrets.secretsByProfileId, {})
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('getActiveProfile returns metadata without decrypting secrets', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'profile-store-'))
+  let decryptCalls = 0
+
+  try {
+    const store = new AppProfileStore({
+      userDataPath: rootDir,
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (value) => Buffer.from(`enc:${value}`, 'utf8'),
+        decryptString: (value) => {
+          decryptCalls += 1
+          return Buffer.from(value).toString('utf8').replace(/^enc:/, '')
+        }
+      },
+      now: () => new Date('2026-03-30T01:02:03.000Z'),
+      generateId: () => 'profile-1'
+    })
+
+    await store.createProfile({
+      name: 'dev-admin',
+      region: 'ap-northeast-2',
+      accessKeyId: 'AKIADEVADMIN',
+      secretAccessKey: 'super-secret'
+    })
+
+    const profile = await store.getActiveProfile()
+
+    assert.equal(profile?.id, 'profile-1')
+    assert.equal(decryptCalls, 0)
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('acceptKeychainAccessNotice persists the one-time notice flag', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'profile-store-'))
+
+  try {
+    const store = createStore(rootDir)
+    await store.acceptKeychainAccessNotice()
+
+    const storedProfiles = JSON.parse(
+      await readFile(path.join(rootDir, 'profiles.json'), 'utf8')
+    ) as StoredProfilesFile
+
+    assert.equal(storedProfiles.settings.keychainAccessNoticeAcceptedAt, '2026-03-30T01:02:03.000Z')
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('resetKeychainAccessNotice clears the one-time notice flag', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'profile-store-'))
+
+  try {
+    const store = createStore(rootDir)
+    await store.acceptKeychainAccessNotice()
+    await store.resetKeychainAccessNotice()
+
+    const storedProfiles = JSON.parse(
+      await readFile(path.join(rootDir, 'profiles.json'), 'utf8')
+    ) as StoredProfilesFile
+
+    assert.equal(storedProfiles.settings.keychainAccessNoticeAcceptedAt, null)
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('resetAppData clears profiles, secrets, and stored settings', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'profile-store-'))
+
+  try {
+    const store = createStore(rootDir)
+    await store.createProfile({
+      name: 'dev-admin',
+      region: 'ap-northeast-2',
+      accessKeyId: 'AKIADEVADMIN',
+      secretAccessKey: 'super-secret'
+    })
+    await store.acceptKeychainAccessNotice()
+    await store.updateRuntimeSettings({
+      awsCliPath: '/opt/homebrew/bin/aws',
+      sessionManagerPluginPath: '/opt/homebrew/bin/session-manager-plugin',
+      legacyImportDismissedAt: '2026-03-30T02:00:00.000Z'
+    })
+
+    await store.resetAppData()
+
+    const storedProfiles = JSON.parse(
+      await readFile(path.join(rootDir, 'profiles.json'), 'utf8')
+    ) as StoredProfilesFile
+    const storedSecrets = JSON.parse(
+      await readFile(path.join(rootDir, 'secrets.json'), 'utf8')
+    ) as StoredSecretsFile
+
+    assert.deepEqual(storedProfiles.profiles, [])
+    assert.deepEqual(storedProfiles.settings, {
+      activeProfileId: null,
+      awsCliPath: null,
+      sessionManagerPluginPath: null,
+      legacyImportDismissedAt: null,
+      keychainAccessNoticeAcceptedAt: null
+    })
     assert.deepEqual(storedSecrets.secretsByProfileId, {})
   } finally {
     await rm(rootDir, { recursive: true, force: true })

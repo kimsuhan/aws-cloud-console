@@ -98,6 +98,103 @@ p {
   margin-top: 16px;
 }
 
+.region-picker {
+  position: relative;
+}
+
+.region-picker-trigger {
+  width: 100%;
+  appearance: none;
+  border: 1px solid var(--border);
+  background: #0f141b;
+  color: #d7dee7;
+  text-align: left;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.region-picker-trigger.active {
+  border-color: rgba(146, 255, 154, 0.35);
+}
+
+.region-picker-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.region-picker-copy strong {
+  font: 13px/1.3 monospace;
+  color: #dfffe2;
+}
+
+.region-picker-copy span {
+  font: 12px/1.3 monospace;
+  color: var(--text-dim);
+}
+
+.region-picker-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(100%, 600px);
+  max-height: 420px;
+  overflow: auto;
+  z-index: 20;
+  border: 1px solid var(--border);
+  background: #1e252f;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.35);
+}
+
+.region-picker-group {
+  display: grid;
+}
+
+.region-picker-group-label {
+  padding: 18px 16px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font: 700 13px/1.2 monospace;
+  color: rgba(146, 255, 154, 0.82);
+}
+
+.region-picker-option {
+  appearance: none;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: #d7dee7;
+  text-align: left;
+  padding: 16px;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.region-picker-option span {
+  font: 600 14px/1.3 "SF Pro Text", "Segoe UI", sans-serif;
+  color: #eef4fb;
+  min-width: 0;
+}
+
+.region-picker-option strong {
+  font: 700 14px/1.3 monospace;
+  color: #d6dce5;
+  flex-shrink: 0;
+}
+
+.region-picker-option:hover,
+.region-picker-option.active {
+  background: rgba(88, 181, 255, 0.12);
+}
+
+.region-picker-option.active span,
+.region-picker-option.active strong {
+  color: #58b5ff;
+}
+
 .profile-button {
   appearance: none;
   border: 0;
@@ -648,5 +745,20 @@ p {
 
   .welcome-copy {
     width: min(640px, calc(100vw - 48px));
+  }
+
+  .region-picker-panel {
+    width: min(calc(100vw - 64px), 100%);
+    max-height: 50vh;
+  }
+
+  .region-picker-option {
+    gap: 12px;
+    padding: 14px 12px;
+  }
+
+  .region-picker-option span,
+  .region-picker-option strong {
+    font-size: 13px;
   }
 }

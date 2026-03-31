@@ -64,6 +64,7 @@ export interface AppReadinessState {
   needsProfileSetup: boolean
   needsDependencySetup: boolean
   canImportLegacyProfiles: boolean
+  needsKeychainAccessNotice: boolean
 }
 
 export interface Ec2InstanceSummary {
@@ -184,6 +185,8 @@ export interface ElectronApi {
   updateRuntimePaths: (request: UpdateRuntimePathsRequest) => Promise<RuntimeConfigState>
   importLegacyProfiles: () => Promise<LegacyImportResult>
   dismissLegacyImport: () => Promise<void>
+  acknowledgeKeychainAccessNotice: () => Promise<void>
+  resetAppData: () => Promise<void>
   listEc2Instances: () => Promise<Ec2InstanceSummary[]>
   listTunnelTargets: (kind: TunnelKind) => Promise<TunnelTargetSummary[]>
   openTunnelSession: (request: OpenTunnelSessionRequest) => Promise<TunnelSessionState>
