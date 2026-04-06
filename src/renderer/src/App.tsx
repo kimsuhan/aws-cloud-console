@@ -2,18 +2,25 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
   ActionId,
+  AppLanguage,
   AppProfileSummary,
   AppReadinessState,
+  AppTheme,
+  AppUiScale,
+  CreateSavedShortcutRequest,
   CreateProfileRequest,
   Ec2InstanceSummary,
+  LaunchShortcutResult,
   OpenTunnelSessionRequest,
+  QuickAccessState,
+  ListS3ObjectsRequest,
   SessionErrorEvent,
   SessionExitEvent,
-  SessionOutputEvent,
   SessionTabState,
+  S3BucketSummary,
+  S3ObjectListResult,
   TunnelErrorEvent,
   TunnelExitEvent,
-  TunnelKind,
   TunnelLogEvent,
   TunnelSessionState,
   TunnelTargetSummary,
@@ -24,26 +31,18 @@ import type {
 import { findRegionOption } from './region-catalog'
 import { RegionPicker } from './components/RegionPicker'
 import { SessionTerminal } from './components/SessionTerminal'
-
-const actionDefinitions: Array<{ id: ActionId; label: string; description: string }> = [
-  {
-    id: 'ec2-ssm-connect',
-    label: 'EC2 SSM Connect',
-    description: 'List EC2 instances for the selected profile and open SSM shell tabs.'
-  },
-  {
-    id: 'aws-tunneling',
-    label: 'AWS Tunneling',
-    description: 'Port-forward DB or Redis targets through an SSM jump instance.'
-  }
-]
-
-interface TunnelDraftState {
-  kind: TunnelKind | null
-  targetId: string | null
-  jumpInstanceId: string | null
-  localPort: string
-}
+import { DashboardHome } from './dashboard-home'
+import { resolveDisplayedAppSettings } from './displayed-app-settings'
+import { Ec2Workspace } from './ec2-workspace'
+import { I18nProvider, detectAppLanguage, translate } from './i18n'
+import { runMotionSafeTransition } from './motion'
+import { QuickAccessDashboard, buildSsmShortcutDraft, buildTunnelShortcutDraft } from './quick-access'
+import { S3Workspace } from './s3-workspace'
+import { SettingsDrawer } from './settings-drawer'
+import { buildSsmSessionPanelStates } from './ssm-session-panel-state'
+import { TunnelWorkspace, resolveTunnelActionState, type TunnelActionIssue, type TunnelDraftState } from './tunnel-workspace'
+import { UtilityPanel, type UtilityPanelNotice } from './utility-panel'
+import { WorkspaceRail } from './workspace-rail'
 
 interface ProfileFormState {
   name: string
@@ -58,17 +57,52 @@ interface RuntimePathFormState {
   sessionManagerPluginPath: string
 }
 
-function estimateInitialTerminalSize(): { cols: number; rows: number } {
+interface ProfileEc2WorkspaceState {
+  instances: Ec2InstanceSummary[]
+  loading: boolean
+  error: string | null
+  pendingInstanceId: string | null
+  selectedInstanceId: string | null
+}
+
+interface ProfileTunnelWorkspaceState {
+  tunnelTargets: TunnelTargetSummary[]
+  tunnelTargetsLoading: boolean
+  tunnelTargetsError: string | null
+  jumpInstances: Ec2InstanceSummary[]
+  jumpInstancesLoading: boolean
+  jumpInstancesError: string | null
+  pendingTunnelOpen: boolean
+  tunnelDraft: TunnelDraftState
+}
+
+interface ProfileS3WorkspaceState {
+  buckets: S3BucketSummary[]
+  bucketsLoading: boolean
+  bucketsError: string | null
+  selectedBucketName: string | null
+  currentPrefix: string
+  searchQuery: string
+  submittedQuery: string
+  objectList: S3ObjectListResult | null
+  objectsLoading: boolean
+  objectsError: string | null
+}
+
+type WorkspaceView = 'dashboard' | 'quick-access' | 'settings' | ActionId
+
+function estimateInitialTerminalSize(uiScale: AppUiScale = 'system'): { cols: number; rows: number } {
   if (typeof window === 'undefined') {
     return { cols: 120, rows: 30 }
   }
 
   const estimatedWidth = Math.max(window.innerWidth - 360, 640)
   const estimatedHeight = Math.max(window.innerHeight - 180, 320)
+  const scaleFactor = uiScaleFactor(uiScale)
 
   return {
-    cols: Math.max(80, Math.floor(estimatedWidth / 9)),
-    rows: Math.max(24, Math.floor(estimatedHeight / 22))
+    cols: Math.max(80, Math.floor(estimatedWidth / (9 * scaleFactor))),
+    rows: Math.max(24, Math.floor(estimatedHeight / (22 * scaleFactor)))
   }
 }
 
@@ -82,58 +116,138 @@ function emptyProfileForm(region = 'ap-northeast-2'): ProfileFormState {
   }
 }
 
-function missingDependencyMessage(readiness: AppReadinessState): string | null {
+function emptyEc2WorkspaceState(): ProfileEc2WorkspaceState {
+  return {
+    instances: [],
+    loading: false,
+    error: null,
+    pendingInstanceId: null,
+    selectedInstanceId: null
+  }
+}
+
+function emptyTunnelWorkspaceState(): ProfileTunnelWorkspaceState {
+  return {
+    tunnelTargets: [],
+    tunnelTargetsLoading: false,
+    tunnelTargetsError: null,
+    jumpInstances: [],
+    jumpInstancesLoading: false,
+    jumpInstancesError: null,
+    pendingTunnelOpen: false,
+    tunnelDraft: {
+      kind: null,
+      targetId: null,
+      jumpInstanceId: null,
+      localPort: ''
+    }
+  }
+}
+
+function emptyS3WorkspaceState(): ProfileS3WorkspaceState {
+  return {
+    buckets: [],
+    bucketsLoading: false,
+    bucketsError: null,
+    selectedBucketName: null,
+    currentPrefix: '',
+    searchQuery: '',
+    submittedQuery: '',
+    objectList: null,
+    objectsLoading: false,
+    objectsError: null
+  }
+}
+
+function missingDependencyMessage(readiness: AppReadinessState, language: AppLanguage): string | null {
   const missing: string[] = []
 
   if (!readiness.dependencyStatus.awsCli.installed) {
-    missing.push('aws CLI')
+    missing.push(t(language, 'settings.dependency.awsCli'))
   }
 
   if (!readiness.dependencyStatus.sessionManagerPlugin.installed) {
-    missing.push('session-manager-plugin')
+    missing.push(t(language, 'settings.dependency.sessionManagerPlugin'))
   }
 
-  return missing.length > 0 ? `${missing.join(' and ')} not found.` : null
+  return missing.length > 0 ? t(language, 'settings.runtimeMissing', { tools: missing.join(', ') }) : null
 }
 
-function dependencyCaption(label: string, installed: boolean, resolvedPath: string | null, source: string): string {
-  if (!installed) {
-    return `${label} is missing.`
-  }
+function t(language: AppLanguage, key: string, params?: Record<string, string | number>): string {
+  return translate(language, key, params)
+}
 
-  return `${label} resolved from ${source}: ${resolvedPath}`
+function tunnelActionIssueMessage(language: AppLanguage, issue: TunnelActionIssue): string {
+  switch (issue) {
+    case 'missing-kind':
+      return t(language, 'tunnels.validation.missingKind')
+    case 'missing-target':
+      return t(language, 'tunnels.validation.missingTarget')
+    case 'missing-jump':
+      return t(language, 'tunnels.validation.missingJump')
+    case 'missing-port':
+      return t(language, 'tunnels.validation.missingPort')
+    case 'invalid-port':
+      return t(language, 'tunnels.validation.invalidPort')
+    case 'selection-unavailable':
+      return t(language, 'tunnels.validation.selectionUnavailable')
+    default:
+      return t(language, 'tunnels.validation.incomplete')
+  }
+}
+
+function normalizeAppTheme(theme: AppTheme | null | undefined): AppTheme {
+  return theme ?? 'system'
+}
+
+function normalizeAppUiScale(uiScale: AppUiScale | null | undefined): AppUiScale {
+  return uiScale ?? 'system'
+}
+
+function uiScaleFactor(uiScale: AppUiScale): number {
+  switch (uiScale) {
+    case '90':
+      return 0.9
+    case '110':
+      return 1.1
+    case '120':
+      return 1.2
+    case 'system':
+    case '100':
+    default:
+      return 1
+  }
 }
 
 export function App(): React.JSX.Element {
+  const [language, setLanguage] = useState<AppLanguage>(() =>
+    typeof navigator === 'undefined' ? 'en' : detectAppLanguage(navigator.language)
+  )
+  const [theme, setTheme] = useState<AppTheme>('system')
+  const [uiScale, setUiScale] = useState<AppUiScale>('system')
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
   const [readiness, setReadiness] = useState<AppReadinessState | null>(null)
+  const [quickAccess, setQuickAccess] = useState<QuickAccessState>({
+    favorites: [],
+    presets: [],
+    recents: []
+  })
+  const [currentWorkspace, setCurrentWorkspace] = useState<WorkspaceView>('dashboard')
+  const [notices, setNotices] = useState<UtilityPanelNotice[]>([])
+  const [notificationActions, setNotificationActions] = useState<
+    Record<string, { actionLabel?: string; onAction?: () => void; dismissAfterMs?: number }>
+  >({})
   const [loading, setLoading] = useState(true)
-  const [selectedAction, setSelectedAction] = useState<ActionId | null>(null)
   const [selectionError, setSelectionError] = useState<string | null>(null)
   const [activeTabId, setActiveTabId] = useState<string | null>(null)
   const [sessionTabs, setSessionTabs] = useState<SessionTabState[]>([])
   const [tunnelTabs, setTunnelTabs] = useState<TunnelSessionState[]>([])
   const [sessionErrors, setSessionErrors] = useState<Record<string, string>>({})
   const [tunnelErrors, setTunnelErrors] = useState<Record<string, string>>({})
-  const [instances, setInstances] = useState<Ec2InstanceSummary[]>([])
-  const [instancesLoading, setInstancesLoading] = useState(false)
-  const [instancesError, setInstancesError] = useState<string | null>(null)
-  const [pendingInstanceId, setPendingInstanceId] = useState<string | null>(null)
-  const [newTabMenuOpen, setNewTabMenuOpen] = useState(false)
-  const sessionHistoryRef = useRef<Record<string, string>>({})
+  const [ec2WorkspaceByProfileId, setEc2WorkspaceByProfileId] = useState<Record<string, ProfileEc2WorkspaceState>>({})
   const tunnelLogRef = useRef<Record<string, string>>({})
-  const [tunnelTargets, setTunnelTargets] = useState<TunnelTargetSummary[]>([])
-  const [tunnelTargetsLoading, setTunnelTargetsLoading] = useState(false)
-  const [tunnelTargetsError, setTunnelTargetsError] = useState<string | null>(null)
-  const [jumpInstances, setJumpInstances] = useState<Ec2InstanceSummary[]>([])
-  const [jumpInstancesLoading, setJumpInstancesLoading] = useState(false)
-  const [jumpInstancesError, setJumpInstancesError] = useState<string | null>(null)
-  const [pendingTunnelOpen, setPendingTunnelOpen] = useState(false)
-  const [tunnelDraft, setTunnelDraft] = useState<TunnelDraftState>({
-    kind: null,
-    targetId: null,
-    jumpInstanceId: null,
-    localPort: ''
-  })
+  const [tunnelWorkspaceByProfileId, setTunnelWorkspaceByProfileId] = useState<Record<string, ProfileTunnelWorkspaceState>>({})
+  const [s3WorkspaceByProfileId, setS3WorkspaceByProfileId] = useState<Record<string, ProfileS3WorkspaceState>>({})
   const [profileForm, setProfileForm] = useState<ProfileFormState>(emptyProfileForm())
   const [runtimePaths, setRuntimePaths] = useState<RuntimePathFormState>({
     awsCliPath: '',
@@ -142,14 +256,13 @@ export function App(): React.JSX.Element {
   const [profileFormError, setProfileFormError] = useState<string | null>(null)
   const [runtimeFormError, setRuntimeFormError] = useState<string | null>(null)
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
-  const [profileManagerOpen, setProfileManagerOpen] = useState(false)
   const [resetAppDataConfirmVisible, setResetAppDataConfirmVisible] = useState(false)
   const [resetAppDataConfirmationText, setResetAppDataConfirmationText] = useState('')
-  const sessionOpenSizeRef = useRef<{ cols: number; rows: number }>(estimateInitialTerminalSize())
+  const sessionOpenSizeRef = useRef<{ cols: number; rows: number }>(estimateInitialTerminalSize(uiScale))
 
   useEffect(() => {
     const updateEstimatedSize = () => {
-      sessionOpenSizeRef.current = estimateInitialTerminalSize()
+      sessionOpenSizeRef.current = estimateInitialTerminalSize(uiScale)
     }
 
     updateEstimatedSize()
@@ -158,47 +271,206 @@ export function App(): React.JSX.Element {
     return () => {
       window.removeEventListener('resize', updateEstimatedSize)
     }
-  }, [])
+  }, [uiScale])
 
   async function refreshReadiness(): Promise<void> {
     const nextReadiness = await window.electronAPI.getAppReadiness()
     setReadiness(nextReadiness)
+    if (nextReadiness.appSettings.language) {
+      setLanguage(nextReadiness.appSettings.language)
+    }
+    setTheme(normalizeAppTheme(nextReadiness.appSettings.theme))
+    setUiScale(normalizeAppUiScale(nextReadiness.appSettings.uiScale))
     setRuntimePaths({
       awsCliPath: nextReadiness.runtimeConfig.awsCliPath ?? '',
       sessionManagerPluginPath: nextReadiness.runtimeConfig.sessionManagerPluginPath ?? ''
     })
   }
 
+  async function refreshQuickAccess(): Promise<void> {
+    setQuickAccess(await window.electronAPI.getQuickAccess())
+  }
+
+  async function handleChangeLanguage(nextLanguage: AppLanguage): Promise<void> {
+    setLanguage(nextLanguage)
+    await window.electronAPI.updateAppSettings({
+      language: nextLanguage
+    })
+    pushNotice('success', t(nextLanguage, 'settings.title'))
+  }
+
+  async function handleChangeTheme(nextTheme: AppTheme): Promise<void> {
+    setTheme(nextTheme)
+    await window.electronAPI.updateAppSettings({
+      theme: nextTheme === 'system' ? null : nextTheme
+    })
+    pushNotice('info', t(language, `settings.themeNotice.${nextTheme}`))
+  }
+
+  async function handleChangeUiScale(nextUiScale: AppUiScale): Promise<void> {
+    setUiScale(nextUiScale)
+    await window.electronAPI.updateAppSettings({
+      uiScale: nextUiScale === 'system' ? null : nextUiScale
+    })
+    pushNotice(
+      'info',
+      nextUiScale === 'system'
+        ? t(language, 'settings.uiScaleNotice.system')
+        : t(language, 'settings.uiScaleNotice.manual', { scale: t(language, `settings.uiScale.${nextUiScale}`) })
+    )
+  }
+
+  async function handleSelectProfile(profileId: string): Promise<void> {
+    setSelectedProfileId(profileId)
+
+    try {
+      await window.electronAPI.updateAppSettings({
+        selectedProfileId: profileId
+      })
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   function resetWorkspaceState(): void {
-    setSelectedAction(null)
+    setCurrentWorkspace('dashboard')
     setActiveTabId(null)
     setSessionTabs([])
     setTunnelTabs([])
     setSessionErrors({})
     setTunnelErrors({})
-    setInstances([])
-    setInstancesError(null)
-    setPendingInstanceId(null)
-    setNewTabMenuOpen(false)
-    sessionHistoryRef.current = {}
+    setEc2WorkspaceByProfileId({})
     tunnelLogRef.current = {}
-    setTunnelTargets([])
-    setTunnelTargetsError(null)
-    setJumpInstances([])
-    setJumpInstancesError(null)
-    setPendingTunnelOpen(false)
-    setTunnelDraft({
-      kind: null,
-      targetId: null,
-      jumpInstanceId: null,
-      localPort: ''
+    setTunnelWorkspaceByProfileId({})
+    setS3WorkspaceByProfileId({})
+  }
+
+  function getEc2WorkspaceState(profileId: string): ProfileEc2WorkspaceState {
+    return ec2WorkspaceByProfileId[profileId] ?? emptyEc2WorkspaceState()
+  }
+
+  function updateEc2WorkspaceState(
+    profileId: string,
+    updater: (current: ProfileEc2WorkspaceState) => ProfileEc2WorkspaceState
+  ): void {
+    setEc2WorkspaceByProfileId((current) => ({
+      ...current,
+      [profileId]: updater(current[profileId] ?? emptyEc2WorkspaceState())
+    }))
+  }
+
+  function getTunnelWorkspaceState(profileId: string): ProfileTunnelWorkspaceState {
+    return tunnelWorkspaceByProfileId[profileId] ?? emptyTunnelWorkspaceState()
+  }
+
+  function updateTunnelWorkspaceState(
+    profileId: string,
+    updater: (current: ProfileTunnelWorkspaceState) => ProfileTunnelWorkspaceState
+  ): void {
+    setTunnelWorkspaceByProfileId((current) => ({
+      ...current,
+      [profileId]: updater(current[profileId] ?? emptyTunnelWorkspaceState())
+    }))
+  }
+
+  function getS3WorkspaceState(profileId: string): ProfileS3WorkspaceState {
+    return s3WorkspaceByProfileId[profileId] ?? emptyS3WorkspaceState()
+  }
+
+  function updateS3WorkspaceState(
+    profileId: string,
+    updater: (current: ProfileS3WorkspaceState) => ProfileS3WorkspaceState
+  ): void {
+    setS3WorkspaceByProfileId((current) => ({
+      ...current,
+      [profileId]: updater(current[profileId] ?? emptyS3WorkspaceState())
+    }))
+  }
+
+  function removeProfileWorkspaceState(profileId: string): void {
+    setSessionTabs((current) => current.filter((tab) => tab.profileId !== profileId))
+    setTunnelTabs((current) => current.filter((tab) => tab.profileId !== profileId))
+    setSessionErrors((current) => {
+      const next = { ...current }
+      sessionTabs.filter((tab) => tab.profileId === profileId).forEach((tab) => {
+        delete next[tab.id]
+      })
+      return next
     })
+    setTunnelErrors((current) => {
+      const next = { ...current }
+      tunnelTabs.filter((tab) => tab.profileId === profileId).forEach((tab) => {
+        delete next[tab.id]
+        delete tunnelLogRef.current[tab.id]
+      })
+      return next
+    })
+    setEc2WorkspaceByProfileId((current) => {
+      const next = { ...current }
+      delete next[profileId]
+      return next
+    })
+    setTunnelWorkspaceByProfileId((current) => {
+      const next = { ...current }
+      delete next[profileId]
+      return next
+    })
+    setS3WorkspaceByProfileId((current) => {
+      const next = { ...current }
+      delete next[profileId]
+      return next
+    })
+    setActiveTabId((current) => {
+      if (!current) {
+        return current
+      }
+
+      const matchingSession = sessionTabs.find((tab) => tab.id === current && tab.profileId === profileId)
+      const matchingTunnel = tunnelTabs.find((tab) => tab.id === current && tab.profileId === profileId)
+      return matchingSession || matchingTunnel ? null : current
+    })
+  }
+
+  function pushNotice(
+    tone: UtilityPanelNotice['tone'],
+    title: string,
+    options?: { actionLabel?: string; onAction?: () => void; dismissAfterMs?: number }
+  ): void {
+    const id = `notice-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    const notice = { id, tone, title }
+
+    setNotices((current) => [notice, ...current].slice(0, 12))
+    setNotificationActions((current) => ({
+      ...current,
+      [id]: {
+        actionLabel: options?.actionLabel,
+        onAction: options?.onAction,
+        dismissAfterMs: options?.dismissAfterMs ?? 4200
+      }
+    }))
+  }
+
+  function dismissNotification(_id: string): void {}
+
+  function handleNotificationAction(id: string): void {
+    const action = notificationActions[id]?.onAction
+    if (!action) {
+      return
+    }
+
+    action()
+    dismissNotification(id)
+  }
+
+  function showQuickAccess(): void {
+    setActiveTabId(null)
+    setCurrentWorkspace('quick-access')
   }
 
   useEffect(() => {
     let cancelled = false
 
-    void refreshReadiness().then(
+    void Promise.all([refreshReadiness(), refreshQuickAccess()]).then(
       () => {
         if (!cancelled) {
           setLoading(false)
@@ -220,25 +492,69 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (!readiness?.activeProfile) {
+    const root = document.documentElement
+
+    if (theme === 'system') {
+      delete root.dataset.theme
       return
     }
 
-    setProfileForm((current) =>
-      editingProfileId
-        ? current
-        : {
-            ...current,
-            region: readiness.activeProfile?.region ?? current.region
-          }
-    )
-  }, [editingProfileId, readiness?.activeProfile?.region])
+    root.dataset.theme = theme
+  }, [theme])
 
   useEffect(() => {
-    const unsubscribeOutput = window.electronAPI.onSessionOutput((event: SessionOutputEvent) => {
-      sessionHistoryRef.current[event.sessionId] = `${sessionHistoryRef.current[event.sessionId] ?? ''}${event.data}`
-    })
+    document.documentElement.style.setProperty('--ui-scale', uiScaleFactor(uiScale).toString())
+  }, [uiScale])
 
+  useEffect(() => {
+    if (!readiness?.profiles.length || editingProfileId) {
+      return
+    }
+
+    setProfileForm((current) => ({
+      ...current,
+      region: readiness.profiles[0]?.region ?? current.region
+    }))
+  }, [editingProfileId, readiness?.profiles])
+
+  useEffect(() => {
+    if (!readiness) {
+      return
+    }
+
+    const validProfileIds = new Set(readiness.profiles.map((profile) => profile.id))
+    setEc2WorkspaceByProfileId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([profileId]) => validProfileIds.has(profileId)))
+    )
+    setTunnelWorkspaceByProfileId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([profileId]) => validProfileIds.has(profileId)))
+    )
+    setS3WorkspaceByProfileId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([profileId]) => validProfileIds.has(profileId)))
+    )
+  }, [readiness])
+
+  useEffect(() => {
+    if (!readiness) {
+      return
+    }
+
+    const validProfileIds = new Set(readiness.profiles.map((profile) => profile.id))
+    setSelectedProfileId((current) => {
+      if (current && validProfileIds.has(current)) {
+        return current
+      }
+
+      const persistedProfileId = readiness.appSettings.selectedProfileId
+      if (persistedProfileId && validProfileIds.has(persistedProfileId)) {
+        return persistedProfileId
+      }
+
+      return readiness.profiles[0]?.id ?? null
+    })
+  }, [readiness])
+
+  useEffect(() => {
     const unsubscribeExit = window.electronAPI.onSessionExit((event: SessionExitEvent) => {
       setSessionTabs((current) =>
         current.map((tab) => (tab.id === event.sessionId ? { ...tab, status: 'closed' } : tab))
@@ -250,6 +566,7 @@ export function App(): React.JSX.Element {
         ...current,
         [event.sessionId]: event.message
       }))
+      pushNotice('error', event.message)
 
       setSessionTabs((current) =>
         current.map((tab) => (tab.id === event.sessionId ? { ...tab, status: 'error' } : tab))
@@ -285,6 +602,7 @@ export function App(): React.JSX.Element {
         ...current,
         [event.sessionId]: event.message
       }))
+      pushNotice('error', event.message)
 
       setTunnelTabs((current) =>
         current.map((tab) => (tab.id === event.sessionId ? { ...tab, status: 'error' } : tab))
@@ -292,7 +610,6 @@ export function App(): React.JSX.Element {
     })
 
     return () => {
-      unsubscribeOutput()
       unsubscribeExit()
       unsubscribeError()
       unsubscribeTunnelLog()
@@ -302,103 +619,260 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (!readiness?.activeProfile || selectedAction !== 'ec2-ssm-connect') {
+    if (!readiness || currentWorkspace !== 'ec2-ssm-connect') {
       return
     }
 
     let cancelled = false
-    setInstancesLoading(true)
-    setInstancesError(null)
 
-    void window.electronAPI.listEc2Instances().then(
+    if (!selectedProfileId) {
+      return
+    }
+
+    updateEc2WorkspaceState(selectedProfileId, (current) => ({
+      ...current,
+      loading: true,
+      error: null
+    }))
+
+    void window.electronAPI.listEc2Instances(selectedProfileId).then(
       (nextInstances) => {
         if (cancelled) {
           return
         }
 
-        setInstances(nextInstances)
-        setInstancesLoading(false)
+        updateEc2WorkspaceState(selectedProfileId, (current) => ({
+          ...current,
+          instances: nextInstances,
+          selectedInstanceId:
+            current.selectedInstanceId ?? nextInstances.find((instance) => instance.state === 'running')?.id ?? null,
+          loading: false
+        }))
       },
       (error: unknown) => {
         if (cancelled) {
           return
         }
 
-        setInstancesError(error instanceof Error ? error.message : String(error))
-        setInstancesLoading(false)
+        updateEc2WorkspaceState(selectedProfileId, (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : String(error),
+          loading: false
+        }))
       }
     )
 
     return () => {
       cancelled = true
     }
-  }, [readiness?.activeProfile?.id, readiness?.activeProfile?.region, selectedAction])
+  }, [currentWorkspace, readiness, selectedProfileId])
 
   useEffect(() => {
-    if (!readiness?.activeProfile || selectedAction !== 'aws-tunneling' || !tunnelDraft.kind) {
+    if (!readiness || currentWorkspace !== 'aws-tunneling') {
       return
     }
 
     let cancelled = false
-    setTunnelTargetsLoading(true)
-    setTunnelTargetsError(null)
 
-    void window.electronAPI.listTunnelTargets(tunnelDraft.kind).then(
-      (targets) => {
-        if (cancelled) {
-          return
-        }
-
-        setTunnelTargets(targets)
-        setTunnelTargetsLoading(false)
-      },
-      (error: unknown) => {
-        if (cancelled) {
-          return
-        }
-
-        setTunnelTargetsError(error instanceof Error ? error.message : String(error))
-        setTunnelTargetsLoading(false)
-      }
-    )
-
-    return () => {
-      cancelled = true
-    }
-  }, [readiness?.activeProfile?.id, readiness?.activeProfile?.region, selectedAction, tunnelDraft.kind])
-
-  useEffect(() => {
-    if (!readiness?.activeProfile || selectedAction !== 'aws-tunneling') {
+    if (!selectedProfileId) {
       return
     }
 
-    let cancelled = false
-    setJumpInstancesLoading(true)
-    setJumpInstancesError(null)
+    updateTunnelWorkspaceState(selectedProfileId, (current) => ({
+      ...current,
+      jumpInstancesLoading: true,
+      jumpInstancesError: null
+    }))
 
-    void window.electronAPI.listEc2Instances().then(
+    void window.electronAPI.listEc2Instances(selectedProfileId).then(
       (nextInstances) => {
         if (cancelled) {
           return
         }
 
-        setJumpInstances(nextInstances.filter((instance) => instance.state === 'running'))
-        setJumpInstancesLoading(false)
+        updateTunnelWorkspaceState(selectedProfileId, (current) => ({
+          ...current,
+          jumpInstances: nextInstances.filter((instance) => instance.state === 'running'),
+          jumpInstancesLoading: false
+        }))
       },
       (error: unknown) => {
         if (cancelled) {
           return
         }
 
-        setJumpInstancesError(error instanceof Error ? error.message : String(error))
-        setJumpInstancesLoading(false)
+        updateTunnelWorkspaceState(selectedProfileId, (current) => ({
+          ...current,
+          jumpInstancesError: error instanceof Error ? error.message : String(error),
+          jumpInstancesLoading: false
+        }))
       }
     )
 
     return () => {
       cancelled = true
     }
-  }, [readiness?.activeProfile?.id, selectedAction])
+  }, [currentWorkspace, readiness, selectedProfileId])
+
+  useEffect(() => {
+    if (!readiness || currentWorkspace !== 's3-browser' || !selectedProfileId) {
+      return
+    }
+
+    const s3State = getS3WorkspaceState(selectedProfileId)
+
+    if (!s3State.bucketsLoading && s3State.buckets.length === 0 && !s3State.bucketsError) {
+      void refreshS3Buckets(selectedProfileId)
+      return
+    }
+
+    if (s3State.selectedBucketName && !s3State.objectsLoading && !s3State.objectList && !s3State.objectsError) {
+      void refreshS3Objects(selectedProfileId)
+    }
+  }, [currentWorkspace, readiness, selectedProfileId])
+
+  async function refreshEc2Profile(profileId: string): Promise<void> {
+    updateEc2WorkspaceState(profileId, (current) => ({
+      ...current,
+      loading: true,
+      error: null
+    }))
+
+    try {
+      const nextInstances = await window.electronAPI.listEc2Instances(profileId)
+      updateEc2WorkspaceState(profileId, (current) => ({
+        ...current,
+        instances: nextInstances,
+        selectedInstanceId:
+          current.selectedInstanceId ?? nextInstances.find((instance) => instance.state === 'running')?.id ?? null,
+        loading: false
+      }))
+    } catch (error) {
+      updateEc2WorkspaceState(profileId, (current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : String(error),
+        loading: false
+      }))
+    }
+  }
+
+  async function refreshTunnelTargets(profileId: string, kind: NonNullable<TunnelDraftState['kind']>): Promise<void> {
+    updateTunnelWorkspaceState(profileId, (current) => ({
+      ...current,
+      tunnelTargetsLoading: true,
+      tunnelTargetsError: null
+    }))
+
+    try {
+      const targets = await window.electronAPI.listTunnelTargets(profileId, kind)
+      updateTunnelWorkspaceState(profileId, (current) => ({
+        ...current,
+        tunnelTargets: targets,
+        tunnelTargetsLoading: false
+      }))
+    } catch (error) {
+      updateTunnelWorkspaceState(profileId, (current) => ({
+        ...current,
+        tunnelTargetsError: error instanceof Error ? error.message : String(error),
+        tunnelTargetsLoading: false
+      }))
+    }
+  }
+
+  async function refreshS3Buckets(profileId: string): Promise<void> {
+    updateS3WorkspaceState(profileId, (current) => ({
+      ...current,
+      bucketsLoading: true,
+      bucketsError: null
+    }))
+
+    try {
+      const nextBuckets = await window.electronAPI.listS3Buckets(profileId)
+      const currentState = getS3WorkspaceState(profileId)
+      const selectedBucketName =
+        currentState.selectedBucketName && nextBuckets.some((bucket) => bucket.name === currentState.selectedBucketName)
+          ? currentState.selectedBucketName
+          : nextBuckets[0]?.name ?? null
+
+      updateS3WorkspaceState(profileId, (current) => ({
+        ...current,
+        buckets: nextBuckets,
+        bucketsLoading: false,
+        selectedBucketName,
+        currentPrefix: selectedBucketName === current.selectedBucketName ? current.currentPrefix : '',
+        searchQuery: selectedBucketName === current.selectedBucketName ? current.searchQuery : '',
+        submittedQuery: selectedBucketName === current.selectedBucketName ? current.submittedQuery : '',
+        objectList: selectedBucketName === current.selectedBucketName ? current.objectList : null,
+        objectsError: selectedBucketName === current.selectedBucketName ? current.objectsError : null
+      }))
+
+      if (selectedBucketName) {
+        const prefix = selectedBucketName === currentState.selectedBucketName ? currentState.currentPrefix : ''
+        const query = selectedBucketName === currentState.selectedBucketName ? currentState.submittedQuery : ''
+        await refreshS3Objects(profileId, {
+          bucketName: selectedBucketName,
+          currentPrefix: prefix,
+          submittedQuery: query
+        })
+      }
+    } catch (error) {
+      updateS3WorkspaceState(profileId, (current) => ({
+        ...current,
+        bucketsError: error instanceof Error ? error.message : String(error),
+        bucketsLoading: false
+      }))
+    }
+  }
+
+  async function refreshS3Objects(
+    profileId: string,
+    options?: {
+      bucketName?: string
+      currentPrefix?: string
+      submittedQuery?: string
+    }
+  ): Promise<void> {
+    const currentState = getS3WorkspaceState(profileId)
+    const bucketName = options?.bucketName ?? currentState.selectedBucketName
+
+    if (!bucketName) {
+      return
+    }
+
+    const currentPrefix = options?.currentPrefix ?? currentState.currentPrefix
+    const submittedQuery = options?.submittedQuery ?? currentState.submittedQuery
+
+    updateS3WorkspaceState(profileId, (current) => ({
+      ...current,
+      objectsLoading: true,
+      objectsError: null
+    }))
+
+    try {
+      const request: ListS3ObjectsRequest = {
+        profileId,
+        bucketName,
+        prefix: currentPrefix,
+        query: submittedQuery
+      }
+      const objectList = await window.electronAPI.listS3Objects(request)
+
+      updateS3WorkspaceState(profileId, (current) => ({
+        ...current,
+        selectedBucketName: bucketName,
+        currentPrefix,
+        submittedQuery,
+        objectList,
+        objectsLoading: false
+      }))
+    } catch (error) {
+      updateS3WorkspaceState(profileId, (current) => ({
+        ...current,
+        objectsError: error instanceof Error ? error.message : String(error),
+        objectsLoading: false
+      }))
+    }
+  }
 
   const activeTab = useMemo(
     () => sessionTabs.find((tab) => tab.id === activeTabId) ?? null,
@@ -408,12 +882,42 @@ export function App(): React.JSX.Element {
     () => tunnelTabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tunnelTabs]
   )
+  const ssmSessionPanels = useMemo(
+    () => buildSsmSessionPanelStates(sessionTabs, activeTabId),
+    [activeTabId, sessionTabs]
+  )
   const allTabs = useMemo(() => [...sessionTabs, ...tunnelTabs], [sessionTabs, tunnelTabs])
-  const runningInstances = useMemo(() => instances.filter((instance) => instance.state === 'running'), [instances])
+  const favoriteShortcutIdsByInstance = useMemo(() => {
+    const favoriteMap = new Map<string, string>()
+
+    quickAccess.favorites.forEach((shortcut) => {
+      if (shortcut.launchKind !== 'ssm') {
+        return
+      }
+
+      favoriteMap.set(`${shortcut.profileId}:${shortcut.payload.instanceId}`, shortcut.id)
+    })
+
+    return favoriteMap
+  }, [quickAccess.favorites])
+
+  function resetTunnelDraft(profileId: string): void {
+    updateTunnelWorkspaceState(profileId, (current) => ({
+      ...current,
+      tunnelTargetsError: null,
+      tunnelTargets: [],
+      tunnelDraft: {
+        kind: null,
+        targetId: null,
+        jumpInstanceId: null,
+        localPort: ''
+      }
+    }))
+  }
 
   function beginCreateProfile(): void {
     setEditingProfileId(null)
-    setProfileForm(emptyProfileForm(readiness?.activeProfile?.region ?? 'ap-northeast-2'))
+    setProfileForm(emptyProfileForm(readiness?.profiles[0]?.region ?? 'ap-northeast-2'))
     setProfileFormError(null)
   }
 
@@ -453,6 +957,7 @@ export function App(): React.JSX.Element {
           sessionToken: profileForm.sessionToken.trim() || undefined
         }
         await window.electronAPI.updateProfile(request)
+        removeProfileWorkspaceState(editingProfileId)
       } else {
         const request: CreateProfileRequest = {
           name: profileForm.name.trim(),
@@ -464,44 +969,21 @@ export function App(): React.JSX.Element {
         await window.electronAPI.createProfile(request)
       }
 
-      resetWorkspaceState()
       await refreshReadiness()
       beginCreateProfile()
-      setProfileManagerOpen(false)
     } catch (error) {
       setProfileFormError(error instanceof Error ? error.message : String(error))
     }
   }
 
-  async function handleSelectProfile(profileId: string): Promise<void> {
-    try {
-      await window.electronAPI.selectActiveProfile(profileId)
-      resetWorkspaceState()
-      await refreshReadiness()
-      setProfileManagerOpen(false)
-    } catch (error) {
-      setSelectionError(error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  async function handleSetDefaultProfile(profileId: string): Promise<void> {
-    try {
-      await window.electronAPI.setDefaultProfile(profileId)
-      resetWorkspaceState()
-      await refreshReadiness()
-    } catch (error) {
-      setSelectionError(error instanceof Error ? error.message : String(error))
-    }
-  }
-
   async function handleDeleteProfile(profileId: string): Promise<void> {
-    if (!window.confirm('Delete this stored AWS profile?')) {
+    if (!window.confirm(t(appLanguage, 'settings.deleteProfileConfirm'))) {
       return
     }
 
     try {
       await window.electronAPI.deleteProfile(profileId)
-      resetWorkspaceState()
+      removeProfileWorkspaceState(profileId)
       await refreshReadiness()
       if (editingProfileId === profileId) {
         beginCreateProfile()
@@ -516,16 +998,10 @@ export function App(): React.JSX.Element {
 
     try {
       await window.electronAPI.importLegacyProfiles()
-      resetWorkspaceState()
       await refreshReadiness()
     } catch (error) {
       setSelectionError(error instanceof Error ? error.message : String(error))
     }
-  }
-
-  async function handleDismissLegacyImport(): Promise<void> {
-    await window.electronAPI.dismissLegacyImport()
-    await refreshReadiness()
   }
 
   async function handleAcknowledgeKeychainAccessNotice(): Promise<void> {
@@ -556,9 +1032,8 @@ export function App(): React.JSX.Element {
       await window.electronAPI.resetAppData()
       setResetAppDataConfirmVisible(false)
       setResetAppDataConfirmationText('')
-      setProfileManagerOpen(false)
       resetWorkspaceState()
-      await refreshReadiness()
+      await Promise.all([refreshReadiness(), refreshQuickAccess()])
     } catch (error) {
       setSelectionError(error instanceof Error ? error.message : String(error))
     }
@@ -584,7 +1059,7 @@ export function App(): React.JSX.Element {
       return tab.title
     }
 
-    return `tunnel:${tab.targetKind}:${tab.targetName}`
+    return t(appLanguage, 'shell.tunnelTabTitle', { name: tab.targetName })
   }
 
   function getSidebarTabSubtitle(tab: SessionTabState | TunnelSessionState): string {
@@ -595,11 +1070,72 @@ export function App(): React.JSX.Element {
     return `localhost:${tab.localPort} · ${tab.status}`
   }
 
-  async function handleOpenSession(instance: Ec2InstanceSummary): Promise<void> {
-    setPendingInstanceId(instance.id)
+  function applyShortcutLaunchResult(result: LaunchShortcutResult): void {
+    if (result.launchKind === 'ssm') {
+      const session = { ...result.session, status: 'open' as const }
+      setSessionTabs((current) => [...current, session])
+      setActiveTabId(session.id)
+      return
+    }
+
+    setTunnelTabs((current) => [...current, result.session])
+    tunnelLogRef.current[result.session.id] = tunnelLogRef.current[result.session.id] ?? ''
+    setActiveTabId(result.session.id)
+  }
+
+  async function handleCreateSavedShortcut(
+    request: CreateSavedShortcutRequest,
+    options?: { revealQuickAccess?: boolean }
+  ): Promise<void> {
+    try {
+      await window.electronAPI.createSavedShortcut(request)
+      await refreshQuickAccess()
+      const message =
+        request.category === 'favorite'
+          ? t(language, 'shell.savedToFavorites', { label: request.label })
+          : t(language, 'shell.savedToPresets', { label: request.label })
+      pushNotice('success', message, {
+        actionLabel: t(language, 'shell.openQuickAccess'),
+        onAction: () => showQuickAccess(),
+        dismissAfterMs: 6400
+      })
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleLaunchShortcut(shortcutId: string): Promise<void> {
+    try {
+      const result = await window.electronAPI.launchShortcut(shortcutId, {
+        cols: sessionOpenSizeRef.current.cols,
+        rows: sessionOpenSizeRef.current.rows
+      })
+      applyShortcutLaunchResult(result)
+      pushNotice('info', t(language, 'shell.shortcutLaunched'))
+      await Promise.all([refreshReadiness(), refreshQuickAccess()])
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleDeleteSavedShortcut(shortcutId: string): Promise<void> {
+    try {
+      await window.electronAPI.deleteSavedShortcut(shortcutId)
+      await refreshQuickAccess()
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleOpenSession(profile: AppProfileSummary, instance: Ec2InstanceSummary): Promise<void> {
+    updateEc2WorkspaceState(profile.id, (current) => ({
+      ...current,
+      pendingInstanceId: instance.id
+    }))
 
     try {
       const session = await window.electronAPI.openSsmSession({
+        profileId: profile.id,
         instanceId: instance.id,
         instanceName: instance.name,
         cols: sessionOpenSizeRef.current.cols,
@@ -607,29 +1143,20 @@ export function App(): React.JSX.Element {
       })
 
       setSessionTabs((current) => [...current, { ...session, status: 'open' }])
-      sessionHistoryRef.current[session.id] = sessionHistoryRef.current[session.id] ?? ''
       setActiveTabId(session.id)
-      setNewTabMenuOpen(false)
+      pushNotice('info', t(language, 'shell.openedShell', { name: instance.name }))
+      await refreshQuickAccess()
     } catch (error) {
-      setInstancesError(error instanceof Error ? error.message : String(error))
+      updateEc2WorkspaceState(profile.id, (current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : String(error)
+      }))
     } finally {
-      setPendingInstanceId(null)
+      updateEc2WorkspaceState(profile.id, (current) => ({
+        ...current,
+        pendingInstanceId: null
+      }))
     }
-  }
-
-  async function handleActionSelection(actionId: ActionId): Promise<void> {
-    setSelectedAction(actionId)
-    setActiveTabId(null)
-    setNewTabMenuOpen(false)
-    setTunnelTargets([])
-    setTunnelTargetsError(null)
-    setJumpInstancesError(null)
-    setTunnelDraft({
-      kind: null,
-      targetId: null,
-      jumpInstanceId: null,
-      localPort: ''
-    })
   }
 
   async function handleCloseTab(sessionId: string): Promise<void> {
@@ -652,7 +1179,7 @@ export function App(): React.JSX.Element {
         return remainingTunnelTabs[0]?.id ?? null
       })
       if (activeTabId === sessionId && remainingTunnelTabs.length === 0 && sessionTabs.length === 0) {
-        setSelectedAction(null)
+        setCurrentWorkspace('dashboard')
       }
       return
     }
@@ -661,7 +1188,6 @@ export function App(): React.JSX.Element {
 
     const remainingTabs = sessionTabs.filter((tab) => tab.id !== sessionId)
     setSessionTabs(remainingTabs)
-    delete sessionHistoryRef.current[sessionId]
     setSessionErrors((current) => {
       const next = { ...current }
       delete next[sessionId]
@@ -677,56 +1203,58 @@ export function App(): React.JSX.Element {
     })
   }
 
-  async function handleOpenTunnel(): Promise<void> {
-    if (!tunnelDraft.kind || !tunnelDraft.targetId || !tunnelDraft.jumpInstanceId || !tunnelDraft.localPort) {
-      setTunnelTargetsError('Select tunnel type, target, jump instance, and local port.')
+  async function handleOpenTunnel(profile: AppProfileSummary): Promise<void> {
+    const tunnelState = getTunnelWorkspaceState(profile.id)
+    const nextTunnelActionState = resolveTunnelActionState({
+      tunnelDraft: tunnelState.tunnelDraft,
+      tunnelTargets: tunnelState.tunnelTargets,
+      jumpInstances: tunnelState.jumpInstances
+    })
+
+    if (nextTunnelActionState.issue) {
+      updateTunnelWorkspaceState(profile.id, (current) => ({
+        ...current,
+        tunnelTargetsError: tunnelActionIssueMessage(language, nextTunnelActionState.issue)
+      }))
       return
     }
 
-    const selectedTarget = tunnelTargets.find((target) => target.id === tunnelDraft.targetId)
-    const jumpInstance = jumpInstances.find((instance) => instance.id === tunnelDraft.jumpInstanceId)
-
-    if (!selectedTarget || !jumpInstance) {
-      setTunnelTargetsError('Target or jump instance is no longer available.')
-      return
-    }
-
-    const localPort = Number(tunnelDraft.localPort)
-    if (!Number.isInteger(localPort) || localPort <= 0) {
-      setTunnelTargetsError('Local port must be a valid positive integer.')
-      return
-    }
-
-    setPendingTunnelOpen(true)
-    setTunnelTargetsError(null)
+    updateTunnelWorkspaceState(profile.id, (current) => ({
+      ...current,
+      pendingTunnelOpen: true,
+      tunnelTargetsError: null
+    }))
 
     try {
       const request: OpenTunnelSessionRequest = {
-        targetName: selectedTarget.name,
-        targetKind: selectedTarget.kind,
-        targetEndpoint: selectedTarget.endpoint,
-        remotePort: selectedTarget.remotePort,
-        localPort,
-        jumpInstanceId: jumpInstance.id,
-        jumpInstanceName: jumpInstance.name
+        profileId: profile.id,
+        targetId: nextTunnelActionState.selectedTarget.id,
+        targetName: nextTunnelActionState.selectedTarget.name,
+        targetKind: nextTunnelActionState.selectedTarget.kind,
+        targetEndpoint: nextTunnelActionState.selectedTarget.endpoint,
+        remotePort: nextTunnelActionState.selectedTarget.remotePort,
+        localPort: nextTunnelActionState.localPort,
+        jumpInstanceId: nextTunnelActionState.selectedJumpHost.id,
+        jumpInstanceName: nextTunnelActionState.selectedJumpHost.name
       }
       const session = await window.electronAPI.openTunnelSession(request)
 
       setTunnelTabs((current) => [...current, session])
       tunnelLogRef.current[session.id] = ''
       setActiveTabId(session.id)
-      setSelectedAction(null)
-      setNewTabMenuOpen(false)
-      setTunnelDraft({
-        kind: null,
-        targetId: null,
-        jumpInstanceId: null,
-        localPort: ''
-      })
+      resetTunnelDraft(profile.id)
+      pushNotice('info', t(language, 'shell.openedTunnel', { name: nextTunnelActionState.selectedTarget.name, port: session.localPort }))
+      await refreshQuickAccess()
     } catch (error) {
-      setTunnelTargetsError(error instanceof Error ? error.message : String(error))
+      updateTunnelWorkspaceState(profile.id, (current) => ({
+        ...current,
+        tunnelTargetsError: error instanceof Error ? error.message : String(error)
+      }))
     } finally {
-      setPendingTunnelOpen(false)
+      updateTunnelWorkspaceState(profile.id, (current) => ({
+        ...current,
+        pendingTunnelOpen: false
+      }))
     }
   }
 
@@ -734,474 +1262,226 @@ export function App(): React.JSX.Element {
     return <div className="state-screen terminal-theme">Initializing workspace...</div>
   }
 
-  const missingDependencies = missingDependencyMessage(readiness)
-  const activeRegionDisplay = findRegionOption(readiness.activeProfile?.region ?? '')
+  const { appLanguage, appTheme, appUiScale } = resolveDisplayedAppSettings(readiness, {
+    language,
+    theme,
+    uiScale
+  })
+  const missingDependencies = missingDependencyMessage(readiness, appLanguage)
+  const liveItems = allTabs.map((tab) => ({
+    id: tab.id,
+    label: getSidebarTabTitle(tab),
+    meta: getSidebarTabSubtitle(tab),
+    status: tab.status
+  }))
+  const toastItems = notices.slice(0, 4).map((notice) => ({
+    ...notice,
+    actionLabel: notificationActions[notice.id]?.actionLabel,
+    onAction: notificationActions[notice.id]?.onAction,
+    dismissAfterMs: notificationActions[notice.id]?.dismissAfterMs
+  }))
+  const liveTabs = allTabs.map((tab) => ({
+    id: tab.id,
+    title: getSidebarTabTitle(tab),
+    subtitle: getSidebarTabSubtitle(tab),
+    active: activeTabId === tab.id
+  }))
+  const selectedProfile = selectedProfileId
+    ? readiness.profiles.find((profile) => profile.id === selectedProfileId) ?? null
+    : null
 
   if (readiness.profiles.length === 0) {
     return (
-      <main className="gate-layout">
-        <section className="gate-card">
-          <p className="eyebrow">App Profiles</p>
-          <h1>Create your first AWS profile</h1>
-          <p className="body">Store credentials inside the app and stop depending on local AWS config files.</p>
+      <I18nProvider language={appLanguage}>
+        <main className="gate-layout">
+          <section className="gate-card">
+            <p className="eyebrow">{t(appLanguage, 'shell.appProfiles')}</p>
+            <h1>{t(appLanguage, 'shell.createFirstProfile')}</h1>
+            <p className="body">{t(appLanguage, 'shell.createFirstProfileCopy')}</p>
 
-          {selectionError ? (
-            <div className="callout callout-error">
-              <strong>Profile setup failed.</strong>
-              <p>{selectionError}</p>
-            </div>
-          ) : null}
-
-          {profileFormError ? (
-            <div className="callout callout-error">
-              <strong>Profile validation failed.</strong>
-              <p>{profileFormError}</p>
-            </div>
-          ) : null}
-
-          <div className="profile-form">
-            <input
-              className="tunnel-input"
-              onChange={(event) => setProfileForm((current) => ({ ...current, name: event.target.value }))}
-              placeholder="profile name"
-              value={profileForm.name}
-            />
-            <RegionPicker
-              value={profileForm.region}
-              onChange={(region) => setProfileForm((current) => ({ ...current, region }))}
-            />
-            <input
-              className="tunnel-input"
-              onChange={(event) => setProfileForm((current) => ({ ...current, accessKeyId: event.target.value }))}
-              placeholder="access key id"
-              value={profileForm.accessKeyId}
-            />
-            <input
-              className="tunnel-input"
-              onChange={(event) => setProfileForm((current) => ({ ...current, secretAccessKey: event.target.value }))}
-              placeholder="secret access key"
-              type="password"
-              value={profileForm.secretAccessKey}
-            />
-            <input
-              className="tunnel-input"
-              onChange={(event) => setProfileForm((current) => ({ ...current, sessionToken: event.target.value }))}
-              placeholder="optional session token"
-              type="password"
-              value={profileForm.sessionToken}
-            />
-          </div>
-
-          <div className="tunnel-builder-actions">
-            <button className="new-tab-button" onClick={() => void submitProfileForm()} type="button">
-              [ Save Profile ]
-            </button>
-          </div>
-
-          {readiness.canImportLegacyProfiles ? (
-            <div className="callout">
-              <strong>Legacy AWS files detected.</strong>
-              <p>You can import profiles from <code>~/.aws</code> once, then manage them here.</p>
-              <div className="tunnel-builder-actions">
-                <button className="toolbar-button" onClick={() => void handleImportLegacyProfiles()} type="button">
-                  import local profiles
-                </button>
-                <button className="toolbar-button" onClick={() => void handleDismissLegacyImport()} type="button">
-                  skip import
-                </button>
+            {selectionError ? (
+              <div className="callout callout-error">
+                <strong>{t(appLanguage, 'shell.profileSetupFailed')}</strong>
+                <p>{selectionError}</p>
               </div>
+            ) : null}
+
+            {profileFormError ? (
+              <div className="callout callout-error">
+                <strong>{t(appLanguage, 'shell.profileValidationFailed')}</strong>
+                <p>{profileFormError}</p>
+              </div>
+            ) : null}
+
+            {readiness.canImportLegacyProfiles ? (
+              <div className="callout gate-callout">
+                <strong>{t(appLanguage, 'shell.legacyDetected')}</strong>
+                <p>{t(appLanguage, 'shell.legacyCopy')}</p>
+                <div className="tunnel-builder-actions">
+                  <button className="toolbar-button" onClick={() => void handleImportLegacyProfiles()} type="button">
+                    {t(appLanguage, 'shell.importProfiles')}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="profile-form">
+              <label className="form-field">
+                <span className="form-field-label">{t(appLanguage, 'settings.profileName')}</span>
+                <input
+                  className="tunnel-input"
+                  onChange={(event) => setProfileForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder={t(appLanguage, 'settings.profileNamePlaceholder')}
+                  value={profileForm.name}
+                />
+              </label>
+              <label className="form-field">
+                <span className="form-field-label">{t(appLanguage, 'settings.defaultRegion')}</span>
+                <RegionPicker
+                  ariaLabel={t(appLanguage, 'settings.defaultRegion')}
+                  value={profileForm.region}
+                  onChange={(region) => setProfileForm((current) => ({ ...current, region }))}
+                />
+              </label>
+              <label className="form-field">
+                <span className="form-field-label">{t(appLanguage, 'settings.accessKeyId')}</span>
+                <input
+                  className="tunnel-input"
+                  onChange={(event) => setProfileForm((current) => ({ ...current, accessKeyId: event.target.value }))}
+                  placeholder={t(appLanguage, 'settings.accessKeyPlaceholder')}
+                  value={profileForm.accessKeyId}
+                />
+              </label>
+              <label className="form-field">
+                <span className="form-field-label">{t(appLanguage, 'settings.secretAccessKey')}</span>
+                <input
+                  className="tunnel-input"
+                  onChange={(event) => setProfileForm((current) => ({ ...current, secretAccessKey: event.target.value }))}
+                  placeholder={t(appLanguage, 'settings.secretAccessKey')}
+                  type="password"
+                  value={profileForm.secretAccessKey}
+                />
+              </label>
+              <label className="form-field">
+                <span className="form-field-label">{t(appLanguage, 'settings.sessionToken')}</span>
+                <input
+                  className="tunnel-input"
+                  onChange={(event) => setProfileForm((current) => ({ ...current, sessionToken: event.target.value }))}
+                  placeholder={t(appLanguage, 'settings.sessionTokenPlaceholder')}
+                  type="password"
+                  value={profileForm.sessionToken}
+                />
+              </label>
             </div>
-          ) : null}
-        </section>
-      </main>
-    )
-  }
 
-  if (!readiness.activeProfile) {
-    return (
-      <main className="gate-layout">
-        <section className="gate-card">
-          <p className="eyebrow">Profile Picker</p>
-          <h1>Select an app-managed AWS profile</h1>
-
-          {selectionError ? (
-            <div className="callout callout-error">
-              <strong>Profile selection failed.</strong>
-              <p>{selectionError}</p>
-            </div>
-          ) : null}
-
-          <div className="profile-list">
-            {readiness.profiles.map((profile) => (
-              <button
-                key={profile.id}
-                className="profile-button"
-                onClick={() => void handleSelectProfile(profile.id)}
-                type="button"
-              >
-                {profile.name}
+            <div className="tunnel-builder-actions">
+              <button className="new-tab-button primary-button gate-primary-action" onClick={() => void submitProfileForm()} type="button">
+                {t(appLanguage, 'settings.saveProfile')}
               </button>
-            ))}
-          </div>
-        </section>
-      </main>
+            </div>
+          </section>
+        </main>
+      </I18nProvider>
     )
   }
 
   if (readiness.needsKeychainAccessNotice) {
     return (
-      <main className="gate-layout">
-        <section className="gate-card">
-          <p className="eyebrow">Secure Access</p>
-          <h1>Why the app asks for secure storage access</h1>
-          <p className="body">
-            Your AWS credentials are stored encrypted in the system secure storage. When you continue, the app may ask
-            for keychain access the first time it needs to use the active profile.
-          </p>
-          <p className="body">
-            This is expected for EC2 queries, tunnel target discovery, and SSM session launches. The app does not need
-            to unlock credentials just to render the startup screen.
-          </p>
+      <I18nProvider language={appLanguage}>
+        <main className="gate-layout">
+          <section className="gate-card">
+            <p className="eyebrow">{t(appLanguage, 'shell.secureAccess')}</p>
+            <h1>{t(appLanguage, 'shell.secureStorageTitle')}</h1>
+            <p className="body">{t(appLanguage, 'shell.secureStorageCopy1')}</p>
+            <p className="body">{t(appLanguage, 'shell.secureStorageCopy2')}</p>
 
-          {selectionError ? (
-            <div className="callout callout-error">
-              <strong>Secure storage setup failed.</strong>
-              <p>{selectionError}</p>
+            {selectionError ? (
+              <div className="callout callout-error">
+                <strong>{t(appLanguage, 'shell.secureSetupFailed')}</strong>
+                <p>{selectionError}</p>
+              </div>
+            ) : null}
+
+            <div className="tunnel-builder-actions">
+              <button className="new-tab-button" onClick={() => void handleAcknowledgeKeychainAccessNotice()} type="button">
+                {t(appLanguage, 'shell.secureStorageContinue')}
+              </button>
             </div>
-          ) : null}
-
-          <div className="tunnel-builder-actions">
-            <button className="new-tab-button" onClick={() => void handleAcknowledgeKeychainAccessNotice()} type="button">
-              [ Continue ]
-            </button>
-          </div>
-        </section>
-      </main>
-    )
-  }
-
-  if (readiness.needsDependencySetup) {
-    return (
-      <main className="gate-layout">
-        <section className="gate-card">
-          <p className="eyebrow">Runtime Setup</p>
-          <h1>Configure local AWS executables</h1>
-          <p className="body">Packaged apps often miss your shell PATH, so the app resolves these binaries explicitly.</p>
-
-          {missingDependencies ? (
-            <div className="callout callout-error">
-              <strong>Missing local dependency.</strong>
-              <p>{missingDependencies}</p>
-            </div>
-          ) : null}
-
-          {runtimeFormError ? (
-            <div className="callout callout-error">
-              <strong>Runtime path update failed.</strong>
-              <p>{runtimeFormError}</p>
-            </div>
-          ) : null}
-
-          <div className="profile-form">
-            <div className="empty-card">
-              <strong>aws CLI</strong>
-              <p>
-                {dependencyCaption(
-                  'aws CLI',
-                  readiness.dependencyStatus.awsCli.installed,
-                  readiness.dependencyStatus.awsCli.resolvedPath,
-                  readiness.dependencyStatus.awsCli.source
-                )}
-              </p>
-            </div>
-            <input
-              className="tunnel-input"
-              onChange={(event) => setRuntimePaths((current) => ({ ...current, awsCliPath: event.target.value }))}
-              placeholder="/opt/homebrew/bin/aws"
-              value={runtimePaths.awsCliPath}
-            />
-            <div className="empty-card">
-              <strong>session-manager-plugin</strong>
-              <p>
-                {dependencyCaption(
-                  'session-manager-plugin',
-                  readiness.dependencyStatus.sessionManagerPlugin.installed,
-                  readiness.dependencyStatus.sessionManagerPlugin.resolvedPath,
-                  readiness.dependencyStatus.sessionManagerPlugin.source
-                )}
-              </p>
-            </div>
-            <input
-              className="tunnel-input"
-              onChange={(event) =>
-                setRuntimePaths((current) => ({ ...current, sessionManagerPluginPath: event.target.value }))
-              }
-              placeholder="/opt/homebrew/bin/session-manager-plugin"
-              value={runtimePaths.sessionManagerPluginPath}
-            />
-          </div>
-
-          <div className="tunnel-builder-actions">
-            <button className="new-tab-button" onClick={() => void handleSaveRuntimePaths()} type="button">
-              [ Save Runtime Paths ]
-            </button>
-            <button className="toolbar-button" onClick={() => void refreshReadiness()} type="button">
-              refresh detection
-            </button>
-          </div>
-        </section>
-      </main>
+          </section>
+        </main>
+      </I18nProvider>
     )
   }
 
   return (
+    <I18nProvider language={appLanguage}>
     <main className="workspace-layout terminal-theme">
-      <aside className="sidebar-shell">
-        <div className="sidebar-tabs">
-          {allTabs.length === 0 ? (
-            <div className="sidebar-empty">
-              <span>No open tabs</span>
-            </div>
-          ) : (
-            allTabs.map((tab) => (
-              <div
-                key={tab.id}
-                className={activeTabId === tab.id ? 'tab-row active' : 'tab-row'}
-                onClick={() => setActiveTabId(tab.id)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    setActiveTabId(tab.id)
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="tab-row-copy">
-                  <strong>{getSidebarTabTitle(tab)}</strong>
-                  <span>{getSidebarTabSubtitle(tab)}</span>
-                </div>
-                <button
-                  className="tab-close"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    void handleCloseTab(tab.id)
-                  }}
-                  type="button"
-                >
-                  x
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div className="sidebar-footer">
-          {newTabMenuOpen ? (
-            <div className="new-tab-menu">
-              {actionDefinitions.map((action) => (
-                <button
-                  key={action.id}
-                  className="new-tab-option"
-                  onClick={() => {
-                    void handleActionSelection(action.id)
-                  }}
-                  type="button"
-                >
-                  <strong>{action.label}</strong>
-                  <span>{action.description}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <button
-            className="new-tab-button"
-            onClick={() => {
-              setNewTabMenuOpen((current) => !current)
-            }}
-            type="button"
-          >
-            [ New Tab ]
-          </button>
-        </div>
-      </aside>
+      <WorkspaceRail
+        currentWorkspace={currentWorkspace}
+        hasActiveSession={activeTabId !== null}
+        liveTabs={liveTabs}
+        onSelectWorkspace={(workspace) => {
+          runMotionSafeTransition(() => {
+            setCurrentWorkspace(workspace)
+            setActiveTabId(null)
+          })
+        }}
+        onSelectTab={(tabId) => {
+          setActiveTabId(tabId)
+        }}
+        onCloseTab={(tabId) => {
+          void handleCloseTab(tabId)
+        }}
+      />
 
       <section className="main-shell">
         <div className="main-shell-body">
-          {selectionError ? (
-            <div className="callout callout-error inline-callout">
-              <strong>Action failed.</strong>
-              <p>{selectionError}</p>
-            </div>
-          ) : null}
-
-          {profileManagerOpen ? (
-            <div className="action-shell">
-              <div className="terminal-toolbar">
-                <span>Profile Manager</span>
-                <button className="toolbar-button" onClick={() => setProfileManagerOpen(false)} type="button">
-                  close
-                </button>
-              </div>
-
-              <div className="tunnel-builder">
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">stored profiles</span>
-                  <div className="tunnel-target-list">
-                    {readiness.profiles.map((profile) => (
-                      <div key={profile.id} className="tunnel-target-row">
-                        <strong>{profile.name}</strong>
-                        <span>{profile.region}</span>
-                        <span>{profile.isDefault ? 'default' : 'secondary'}</span>
-                        <span>{profile.id === readiness.activeProfile?.id ? 'active' : 'inactive'}</span>
-                        <div className="tunnel-builder-actions">
-                          <button className="toolbar-button" onClick={() => void handleSelectProfile(profile.id)} type="button">
-                            use
-                          </button>
-                          <button className="toolbar-button" onClick={() => void handleSetDefaultProfile(profile.id)} type="button">
-                            default
-                          </button>
-                          <button className="toolbar-button" onClick={() => beginEditProfile(profile)} type="button">
-                            edit
-                          </button>
-                          <button className="toolbar-button" onClick={() => void handleDeleteProfile(profile.id)} type="button">
-                            delete
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">{editingProfileId ? 'edit profile' : 'create profile'}</span>
-                  {profileFormError ? (
-                    <div className="callout callout-error inline-callout">
-                      <strong>Profile update failed.</strong>
-                      <p>{profileFormError}</p>
-                    </div>
-                  ) : null}
-                  <div className="profile-form">
-                    <input
-                      className="tunnel-input"
-                      onChange={(event) => setProfileForm((current) => ({ ...current, name: event.target.value }))}
-                      placeholder="profile name"
-                      value={profileForm.name}
-                    />
-                    <RegionPicker
-                      value={profileForm.region}
-                      onChange={(region) => setProfileForm((current) => ({ ...current, region }))}
-                    />
-                    <input
-                      className="tunnel-input"
-                      onChange={(event) =>
-                        setProfileForm((current) => ({ ...current, accessKeyId: event.target.value }))
-                      }
-                      placeholder={editingProfileId ? 'leave blank to keep access key' : 'access key id'}
-                      value={profileForm.accessKeyId}
-                    />
-                    <input
-                      className="tunnel-input"
-                      onChange={(event) =>
-                        setProfileForm((current) => ({ ...current, secretAccessKey: event.target.value }))
-                      }
-                      placeholder={editingProfileId ? 'leave blank to keep secret key' : 'secret access key'}
-                      type="password"
-                      value={profileForm.secretAccessKey}
-                    />
-                    <input
-                      className="tunnel-input"
-                      onChange={(event) =>
-                        setProfileForm((current) => ({ ...current, sessionToken: event.target.value }))
-                      }
-                      placeholder={editingProfileId ? 'leave blank to keep session token' : 'optional session token'}
-                      type="password"
-                      value={profileForm.sessionToken}
-                    />
-                  </div>
-                  <div className="tunnel-builder-actions">
-                    <button className="new-tab-button" onClick={() => void submitProfileForm()} type="button">
-                      {editingProfileId ? '[ Update Profile ]' : '[ Save Profile ]'}
-                    </button>
-                    <button className="toolbar-button" onClick={() => beginCreateProfile()} type="button">
-                      new profile
-                    </button>
-                  </div>
-                </div>
-
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">reset app data</span>
-                  <div className="empty-card">
-                    <strong>Delete all local app data</strong>
-                    <p>Remove all stored profiles, encrypted credentials, and local app settings from this Mac.</p>
-                  </div>
-                  {resetAppDataConfirmVisible ? (
-                    <div className="profile-form">
-                      <input
-                        className="tunnel-input"
-                        onChange={(event) => setResetAppDataConfirmationText(event.target.value)}
-                        placeholder="Type RESET to confirm"
-                        value={resetAppDataConfirmationText}
-                      />
-                      <div className="tunnel-builder-actions">
-                        <button
-                          className="toolbar-button"
-                          disabled={resetAppDataConfirmationText !== 'RESET'}
-                          onClick={() => void handleResetAppData()}
-                          type="button"
-                        >
-                          confirm reset app data
-                        </button>
-                        <button
-                          className="toolbar-button"
-                          onClick={() => {
-                            setResetAppDataConfirmVisible(false)
-                            setResetAppDataConfirmationText('')
-                          }}
-                          type="button"
-                        >
-                          cancel
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="tunnel-builder-actions">
-                      <button className="toolbar-button" onClick={() => beginResetAppData()} type="button">
-                        reset app data
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : activeTab ? (
-            <div className="terminal-panel">
-              <div className="terminal-toolbar">
-                <span>{activeTab.title}</span>
-                <div className="terminal-meta">
-                  <span>{activeTab.instanceId}</span>
-                  <span>{activeTab.status}</span>
-                </div>
-              </div>
-
-              {sessionErrors[activeTab.id] ? (
-                <div className="callout callout-error">
-                  <strong>Session error.</strong>
-                  <p>{sessionErrors[activeTab.id]}</p>
+          <div className="workspace-main">
+            <div className="workspace-canvas" data-workspace={activeTab ? 'session' : activeTunnelTab ? 'tunnel-session' : currentWorkspace}>
+              {selectionError ? (
+                <div className="callout callout-error inline-callout">
+                  <strong>Action failed.</strong>
+                  <p>{selectionError}</p>
                 </div>
               ) : null}
 
-              <SessionTerminal
-                key={activeTab.id}
-                sessionId={activeTab.id}
-                initialBuffer={sessionHistoryRef.current[activeTab.id] ?? ''}
-                autoFocus
-              />
-            </div>
-          ) : activeTunnelTab ? (
+              {ssmSessionPanels.map(({ session, isActive }) => (
+                <div
+                  key={session.id}
+                  aria-hidden={!isActive}
+                  className={isActive ? 'terminal-panel' : 'terminal-panel terminal-panel-hidden'}
+                  data-session-panel={session.id}
+                >
+                  <div className="terminal-toolbar">
+                    <span>{session.title}</span>
+                    <div className="terminal-meta">
+                      <span>{session.instanceId}</span>
+                      <span>{session.status}</span>
+                    </div>
+                  </div>
+
+                  {sessionErrors[session.id] ? (
+                    <div className="callout callout-error">
+                      <strong>Session error.</strong>
+                      <p>{sessionErrors[session.id]}</p>
+                    </div>
+                  ) : null}
+
+                  <SessionTerminal
+                    sessionId={session.id}
+                    isActive={isActive}
+                    autoFocus
+                    theme={appTheme}
+                    uiScale={appUiScale}
+                  />
+                </div>
+              ))}
+
+              {!activeTab && activeTunnelTab ? (
             <div className="terminal-panel">
               <div className="terminal-toolbar">
                 <span>
-                  tunnel:{activeTunnelTab.targetKind}:{activeTunnelTab.targetName}
+                  {t(appLanguage, 'shell.tunnelTabTitle', { name: activeTunnelTab.targetName })}
                 </span>
                 <div className="terminal-meta">
                   <span>localhost:{activeTunnelTab.localPort}</span>
@@ -1211,7 +1491,7 @@ export function App(): React.JSX.Element {
 
               {tunnelErrors[activeTunnelTab.id] ? (
                 <div className="callout callout-error inline-callout">
-                  <strong>Tunnel error.</strong>
+                  <strong>{t(appLanguage, 'tunnels.errorTitle')}</strong>
                   <p>{tunnelErrors[activeTunnelTab.id]}</p>
                 </div>
               ) : null}
@@ -1219,19 +1499,19 @@ export function App(): React.JSX.Element {
               <div className="tunnel-status-panel">
                 <div className="tunnel-summary-grid">
                   <div>
-                    <span className="summary-label">target</span>
+                    <span className="summary-label">{t(appLanguage, 'tunnels.summary.target')}</span>
                     <strong>{activeTunnelTab.targetName}</strong>
                     <p>
                       {activeTunnelTab.targetEndpoint}:{activeTunnelTab.remotePort}
                     </p>
                   </div>
                   <div>
-                    <span className="summary-label">jump host</span>
+                    <span className="summary-label">{t(appLanguage, 'tunnels.summary.jump')}</span>
                     <strong>{activeTunnelTab.jumpInstanceName}</strong>
                     <p>{activeTunnelTab.jumpInstanceId}</p>
                   </div>
                   <div>
-                    <span className="summary-label">forward</span>
+                    <span className="summary-label">{t(appLanguage, 'tunnels.summary.forward')}</span>
                     <strong>localhost:{activeTunnelTab.localPort}</strong>
                     <p>
                       {activeTunnelTab.profileName} / {activeTunnelTab.region}
@@ -1241,216 +1521,360 @@ export function App(): React.JSX.Element {
                 <pre className="tunnel-log">{tunnelLogRef.current[activeTunnelTab.id] ?? ''}</pre>
               </div>
             </div>
-          ) : selectedAction === 'ec2-ssm-connect' ? (
-            <div className="action-shell">
-              <div className="terminal-toolbar">
-                <span>EC2 SSM Connect</span>
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setInstancesLoading(true)
-                    setInstancesError(null)
-                    void window.electronAPI.listEc2Instances().then(
-                      (nextInstances) => {
-                        setInstances(nextInstances)
-                        setInstancesLoading(false)
-                      },
-                      (error: unknown) => {
-                        setInstancesError(error instanceof Error ? error.message : String(error))
-                        setInstancesLoading(false)
+          ) : !activeTab && currentWorkspace === 'ec2-ssm-connect' ? (
+            selectedProfile ? (
+              (() => {
+                const ec2State = getEc2WorkspaceState(selectedProfile.id)
+
+                return (
+                  <Ec2Workspace
+                    activeProfileName={selectedProfile.name}
+                    activeRegion={selectedProfile.region}
+                    favoriteShortcutIdsByInstance={
+                      new Map(
+                        ec2State.instances
+                          .map((instance) => [instance.id, favoriteShortcutIdsByInstance.get(`${selectedProfile.id}:${instance.id}`)])
+                          .filter((entry): entry is [string, string] => Boolean(entry[1]))
+                      )
+                    }
+                    instances={ec2State.instances}
+                    instancesLoading={ec2State.loading}
+                    instancesError={ec2State.error}
+                    pendingInstanceId={ec2State.pendingInstanceId}
+                    selectedInstanceId={ec2State.selectedInstanceId}
+                    onRefresh={() => {
+                      void refreshEc2Profile(selectedProfile.id)
+                    }}
+                    onSelectInstance={(instanceId) =>
+                      runMotionSafeTransition(() =>
+                        updateEc2WorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          selectedInstanceId: instanceId
+                        }))
+                      )
+                    }
+                    onOpenSession={(instance) => {
+                      void handleOpenSession(selectedProfile, instance)
+                    }}
+                    onToggleFavorite={(instance, favoriteShortcutId) => {
+                      if (favoriteShortcutId) {
+                        void handleDeleteSavedShortcut(favoriteShortcutId)
+                        return
                       }
-                    )
-                  }}
-                  type="button"
-                >
-                  refresh
-                </button>
-              </div>
 
-              {instancesError ? (
-                <div className="callout callout-error inline-callout">
-                  <strong>EC2 query failed.</strong>
-                  <p>{instancesError}</p>
-                </div>
-              ) : null}
-
-              <div className="instance-table">
-                <div className="instance-table-header">
-                  <span>name</span>
-                  <span>instance id</span>
-                  <span>private ip</span>
-                </div>
-
-                {instancesLoading ? <div className="table-placeholder">Loading EC2 instances...</div> : null}
-
-                {!instancesLoading && runningInstances.length === 0 ? (
-                  <div className="table-placeholder">No running EC2 instances available for this profile and region.</div>
-                ) : null}
-
-                {runningInstances.map((instance) => (
-                  <button
-                    key={instance.id}
-                    className="instance-row"
-                    disabled={pendingInstanceId === instance.id}
-                    onClick={() => {
-                      void handleOpenSession(instance)
+                      void handleCreateSavedShortcut(buildSsmShortcutDraft('favorite', selectedProfile, instance, appLanguage), {
+                        revealQuickAccess: false
+                      })
                     }}
-                    type="button"
-                  >
-                    <span>{instance.name}</span>
-                    <span>{instance.id}</span>
-                    <span>{instance.privateIpAddress ?? '-'}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : selectedAction === 'aws-tunneling' ? (
-            <div className="action-shell">
-              <div className="terminal-toolbar">
-                <span>AWS Tunneling</span>
-                <span className="terminal-meta">
-                  <span>{readiness.activeProfile.name}</span>
-                  <span>{readiness.activeProfile.region}</span>
-                </span>
-              </div>
-
-              {tunnelTargetsError ? (
-                <div className="callout callout-error inline-callout">
-                  <strong>Tunneling setup failed.</strong>
-                  <p>{tunnelTargetsError}</p>
-                </div>
-              ) : null}
-
-              {jumpInstancesError ? (
-                <div className="callout callout-error inline-callout">
-                  <strong>Jump host lookup failed.</strong>
-                  <p>{jumpInstancesError}</p>
-                </div>
-              ) : null}
-
-              <div className="tunnel-builder">
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">1. tunnel type</span>
-                  <div className="choice-row">
-                    <button
-                      className={tunnelDraft.kind === 'db' ? 'choice-button active' : 'choice-button'}
-                      onClick={() => setTunnelDraft((current) => ({ ...current, kind: 'db', targetId: null }))}
-                      type="button"
-                    >
-                      database
-                    </button>
-                    <button
-                      className={tunnelDraft.kind === 'redis' ? 'choice-button active' : 'choice-button'}
-                      onClick={() => setTunnelDraft((current) => ({ ...current, kind: 'redis', targetId: null }))}
-                      type="button"
-                    >
-                      redis
-                    </button>
-                  </div>
-                </div>
-
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">2. remote target</span>
-                  <div className="tunnel-target-list">
-                    {tunnelTargetsLoading ? <div className="table-placeholder">Loading tunnel targets...</div> : null}
-                    {!tunnelTargetsLoading && tunnelTargets.length === 0 ? (
-                      <div className="table-placeholder">Choose a tunnel type to load AWS targets.</div>
-                    ) : null}
-                    {tunnelTargets.map((target) => (
-                      <button
-                        key={target.id}
-                        className={tunnelDraft.targetId === target.id ? 'tunnel-target-row active' : 'tunnel-target-row'}
-                        onClick={() => setTunnelDraft((current) => ({ ...current, targetId: target.id }))}
-                        type="button"
-                      >
-                        <strong>{target.name}</strong>
-                        <span>{target.engine}</span>
-                        <span>
-                          {target.endpoint}:{target.remotePort}
-                        </span>
-                        <span>{target.source}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="tunnel-builder-section">
-                  <span className="summary-label">3. jump instance</span>
-                  <div className="tunnel-target-list">
-                    {jumpInstancesLoading ? <div className="table-placeholder">Loading jump hosts...</div> : null}
-                    {!jumpInstancesLoading && jumpInstances.length === 0 ? (
-                      <div className="table-placeholder">No running jump instance candidates found.</div>
-                    ) : null}
-                    {jumpInstances.map((instance) => (
-                      <button
-                        key={instance.id}
-                        className={
-                          tunnelDraft.jumpInstanceId === instance.id ? 'tunnel-target-row active' : 'tunnel-target-row'
-                        }
-                        onClick={() => setTunnelDraft((current) => ({ ...current, jumpInstanceId: instance.id }))}
-                        type="button"
-                      >
-                        <strong>{instance.name}</strong>
-                        <span>{instance.id}</span>
-                        <span>{instance.privateIpAddress ?? '-'}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="tunnel-builder-section compact">
-                  <span className="summary-label">4. local port</span>
-                  <input
-                    className="tunnel-input"
-                    inputMode="numeric"
-                    onChange={(event) => {
-                      setTunnelDraft((current) => ({ ...current, localPort: event.target.value }))
-                    }}
-                    placeholder="e.g. 5432 / 6379 / 16379"
-                    value={tunnelDraft.localPort}
                   />
-                </div>
+                )
+              })()
+            ) : null
+          ) : !activeTab && currentWorkspace === 's3-browser' ? (
+            selectedProfile ? (
+              (() => {
+                const s3State = getS3WorkspaceState(selectedProfile.id)
 
-                <div className="tunnel-builder-actions">
-                  <button className="new-tab-button" disabled={pendingTunnelOpen} onClick={() => void handleOpenTunnel()} type="button">
-                    {pendingTunnelOpen ? '[ Opening Tunnel... ]' : '[ Open Tunnel ]'}
-                  </button>
-                </div>
-              </div>
+                return (
+                  <S3Workspace
+                    activeProfileName={selectedProfile.name}
+                    activeRegion={selectedProfile.region}
+                    buckets={s3State.buckets}
+                    bucketsLoading={s3State.bucketsLoading}
+                    bucketsError={s3State.bucketsError}
+                    selectedBucketName={s3State.selectedBucketName}
+                    currentPrefix={s3State.currentPrefix}
+                    searchQuery={s3State.searchQuery}
+                    objectList={s3State.objectList}
+                    objectsLoading={s3State.objectsLoading}
+                    objectsError={s3State.objectsError}
+                    onRefreshBuckets={() => {
+                      void refreshS3Buckets(selectedProfile.id)
+                    }}
+                    onRefreshObjects={() => {
+                      void refreshS3Objects(selectedProfile.id)
+                    }}
+                    onSearchQueryChange={(value) => {
+                      updateS3WorkspaceState(selectedProfile.id, (current) => ({
+                        ...current,
+                        searchQuery: value
+                      }))
+                    }}
+                    onSearchSubmit={() => {
+                      const nextState = getS3WorkspaceState(selectedProfile.id)
+                      updateS3WorkspaceState(selectedProfile.id, (current) => ({
+                        ...current,
+                        submittedQuery: current.searchQuery
+                      }))
+                      void refreshS3Objects(selectedProfile.id, {
+                        currentPrefix: nextState.currentPrefix,
+                        submittedQuery: nextState.searchQuery
+                      })
+                    }}
+                    onSelectBucket={(bucketName) => {
+                      runMotionSafeTransition(() => {
+                        updateS3WorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          selectedBucketName: bucketName,
+                          currentPrefix: '',
+                          searchQuery: '',
+                          submittedQuery: '',
+                          objectList: null,
+                          objectsError: null
+                        }))
+                      })
+                      void refreshS3Objects(selectedProfile.id, {
+                        bucketName,
+                        currentPrefix: '',
+                        submittedQuery: ''
+                      })
+                    }}
+                    onOpenPrefix={(prefix) => {
+                      runMotionSafeTransition(() => {
+                        updateS3WorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          currentPrefix: prefix,
+                          objectList: null,
+                          objectsError: null
+                        }))
+                      })
+                      const nextState = getS3WorkspaceState(selectedProfile.id)
+                      void refreshS3Objects(selectedProfile.id, {
+                        currentPrefix: prefix,
+                        submittedQuery: nextState.submittedQuery
+                      })
+                    }}
+                    onSelectBreadcrumb={(prefix) => {
+                      runMotionSafeTransition(() => {
+                        updateS3WorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          currentPrefix: prefix,
+                          objectList: null,
+                          objectsError: null
+                        }))
+                      })
+                      const nextState = getS3WorkspaceState(selectedProfile.id)
+                      void refreshS3Objects(selectedProfile.id, {
+                        currentPrefix: prefix,
+                        submittedQuery: nextState.submittedQuery
+                      })
+                    }}
+                  />
+                )
+              })()
+            ) : null
+          ) : !activeTab && currentWorkspace === 'aws-tunneling' ? (
+            selectedProfile ? (
+              (() => {
+                const tunnelState = getTunnelWorkspaceState(selectedProfile.id)
+                const tunnelActionState = resolveTunnelActionState({
+                  tunnelDraft: tunnelState.tunnelDraft,
+                  tunnelTargets: tunnelState.tunnelTargets,
+                  jumpInstances: tunnelState.jumpInstances
+                })
+                const tunnelActionHint = tunnelActionState.issue
+                  ? tunnelActionIssueMessage(appLanguage, tunnelActionState.issue)
+                  : null
+
+                return (
+                  <TunnelWorkspace
+                    activeProfileName={selectedProfile.name}
+                    activeRegion={selectedProfile.region}
+                    tunnelDraft={tunnelState.tunnelDraft}
+                    tunnelTargets={tunnelState.tunnelTargets}
+                    tunnelTargetsLoading={tunnelState.tunnelTargetsLoading}
+                    tunnelTargetsError={tunnelState.tunnelTargetsError}
+                    jumpInstances={tunnelState.jumpInstances}
+                    jumpInstancesLoading={tunnelState.jumpInstancesLoading}
+                    jumpInstancesError={tunnelState.jumpInstancesError}
+                    actionHint={tunnelActionHint}
+                    canOpenTunnel={tunnelActionState.issue === null}
+                    canSaveShortcut={tunnelActionState.issue === null}
+                    pendingTunnelOpen={tunnelState.pendingTunnelOpen}
+                    onSelectTunnelKind={(kind) => {
+                      runMotionSafeTransition(() => {
+                        updateTunnelWorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          tunnelTargetsError: null,
+                          tunnelTargetsLoading: true,
+                          tunnelTargets: [],
+                          tunnelDraft: {
+                            ...current.tunnelDraft,
+                            kind,
+                            targetId: null,
+                            jumpInstanceId: null,
+                            localPort: ''
+                          }
+                        }))
+                      })
+                      void refreshTunnelTargets(selectedProfile.id, kind)
+                    }}
+                    onSelectTarget={(targetId) => {
+                      runMotionSafeTransition(() => {
+                        updateTunnelWorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          tunnelTargetsError: null,
+                          tunnelDraft: {
+                            ...current.tunnelDraft,
+                            targetId,
+                            jumpInstanceId: null,
+                            localPort: ''
+                          }
+                        }))
+                      })
+                    }}
+                    onSelectJumpHost={(instanceId) => {
+                      runMotionSafeTransition(() => {
+                        updateTunnelWorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          tunnelTargetsError: null,
+                          tunnelDraft: { ...current.tunnelDraft, jumpInstanceId: instanceId }
+                        }))
+                      })
+                    }}
+                    onSelectLocalPort={(port) => {
+                      runMotionSafeTransition(() => {
+                        updateTunnelWorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          tunnelTargetsError: null,
+                          tunnelDraft: { ...current.tunnelDraft, localPort: port }
+                        }))
+                      })
+                    }}
+                    onOpenTunnel={() => {
+                      void handleOpenTunnel(selectedProfile)
+                    }}
+                    onSaveShortcut={() => {
+                      if (tunnelActionState.issue) {
+                        updateTunnelWorkspaceState(selectedProfile.id, (current) => ({
+                          ...current,
+                          tunnelTargetsError: tunnelActionIssueMessage(appLanguage, tunnelActionState.issue!)
+                        }))
+                        return
+                      }
+
+                      void handleCreateSavedShortcut(
+                        buildTunnelShortcutDraft(
+                          'preset',
+                          selectedProfile,
+                          tunnelActionState.selectedTarget,
+                          tunnelActionState.selectedJumpHost,
+                          String(tunnelActionState.localPort),
+                          appLanguage
+                        )
+                      )
+                    }}
+                    onResetDraft={() => resetTunnelDraft(selectedProfile.id)}
+                  />
+                )
+              })()
+            ) : null
+          ) : !activeTab && currentWorkspace === 'quick-access' ? (
+            <QuickAccessDashboard
+              quickAccess={quickAccess}
+              onDeleteShortcut={(shortcutId) => {
+                void handleDeleteSavedShortcut(shortcutId)
+              }}
+              onLaunchShortcut={(shortcutId) => {
+                void handleLaunchShortcut(shortcutId)
+              }}
+            />
+          ) : !activeTab && currentWorkspace === 'settings' ? (
+            <SettingsDrawer
+              language={appLanguage}
+              theme={appTheme}
+              uiScale={appUiScale}
+              profiles={readiness.profiles}
+              editingProfileId={editingProfileId}
+              profileForm={profileForm}
+              profileFormError={profileFormError}
+              runtimeConfig={runtimePaths}
+              runtimeFormError={runtimeFormError ?? missingDependencies}
+              dependencyStatus={readiness.dependencyStatus}
+              resetAppDataConfirmVisible={resetAppDataConfirmVisible}
+              resetAppDataConfirmationText={resetAppDataConfirmationText}
+              onChangeLanguage={(nextLanguage) => {
+                void handleChangeLanguage(nextLanguage)
+              }}
+              onChangeTheme={(nextTheme) => {
+                void handleChangeTheme(nextTheme)
+              }}
+              onChangeUiScale={(nextUiScale) => {
+                void handleChangeUiScale(nextUiScale)
+              }}
+              onBeginEditProfile={(profile) => beginEditProfile(profile)}
+              onDeleteProfile={(profileId) => {
+                void handleDeleteProfile(profileId)
+              }}
+              onBeginCreateProfile={() => beginCreateProfile()}
+              onUpdateProfileForm={(patch) => setProfileForm((current) => ({ ...current, ...patch }))}
+              onSaveProfile={() => {
+                void submitProfileForm()
+              }}
+              onUpdateRuntimeField={(field, value) =>
+                setRuntimePaths((current) => ({
+                  ...current,
+                  [field]: value
+                }))
+              }
+              onSaveRuntimePaths={() => {
+                void handleSaveRuntimePaths()
+              }}
+              onUpdateResetText={(value) => {
+                setResetAppDataConfirmVisible(value.length > 0)
+                setResetAppDataConfirmationText(value)
+              }}
+              onResetAppData={() => {
+                if (!resetAppDataConfirmVisible) {
+                  beginResetAppData()
+                  return
+                }
+                void handleResetAppData()
+              }}
+            />
+          ) : !activeTab ? (
+            <DashboardHome
+              liveSessionCount={allTabs.length}
+              onOpenEc2Workspace={() => setCurrentWorkspace('ec2-ssm-connect')}
+              onOpenQuickAccess={() => setCurrentWorkspace('quick-access')}
+              onOpenTunnelWorkspace={() => setCurrentWorkspace('aws-tunneling')}
+              quickAccessCount={quickAccess.favorites.length + quickAccess.presets.length}
+              recentCount={quickAccess.recents.length}
+            />
+          ) : null}
             </div>
-          ) : (
-            <div className="welcome-shell">
-              <div className="welcome-copy">
-                <h1>Open a new tab.</h1>
-                <p>Use <code>[ New Tab ]</code> in the lower-left corner.</p>
-              </div>
-            </div>
-          )}
+
+            {
+              <UtilityPanel
+                profiles={readiness.profiles}
+                selectedProfileId={selectedProfileId}
+                liveItems={liveItems}
+                notices={notices}
+                onSelectProfile={(profileId) => {
+                  void handleSelectProfile(profileId)
+                }}
+                onToastAction={handleNotificationAction}
+                onToastDismiss={dismissNotification}
+                toastItems={toastItems}
+                workspace={activeTab ? 'session' : activeTunnelTab ? 'tunnel-session' : currentWorkspace}
+              />
+            }
+          </div>
         </div>
 
         <div className="main-statusbar">
           <div className="status-group">
-            <span className="sidebar-label">profile</span>
-            <strong>{readiness.activeProfile.name}</strong>
+            <span className="sidebar-label">profiles</span>
+            <strong>{readiness.profiles.length}</strong>
           </div>
 
           <div className="status-group status-controls">
-            <span className="sidebar-label">
-              {activeRegionDisplay ? `${activeRegionDisplay.group} · ${activeRegionDisplay.city}` : readiness.activeProfile.region}
-            </span>
-            <button
-              className="profile-reset"
-              onClick={() => {
-                setProfileManagerOpen(true)
-                beginCreateProfile()
-              }}
-              type="button"
-            >
-              manage profiles
-            </button>
+            <span className="sidebar-label">{allTabs.length} live</span>
           </div>
         </div>
+
       </section>
     </main>
+    </I18nProvider>
   )
 }

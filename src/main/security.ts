@@ -1,9 +1,16 @@
 import path from 'node:path'
 
+import { appUiScaleValues } from '../shared/contracts'
 import type {
+  AppLanguage,
+  AppTheme,
+  AppUiScale,
+  CreateSavedShortcutRequest,
   CreateProfileRequest,
+  ListS3ObjectsRequest,
   OpenSessionRequest,
   OpenTunnelSessionRequest,
+  UpdateAppSettingsRequest,
   UpdateProfileRequest,
   UpdateRuntimePathsRequest
 } from '../shared/contracts'
@@ -15,10 +22,19 @@ const HOSTNAME_PATTERN =
 const IPV4_PATTERN =
   /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/
 const CONTROL_OR_SHELL_PATTERN = /[\u0000-\u001f\u007f\s"'`$;&|<>\\()]/
+const APP_LANGUAGE_VALUES: AppLanguage[] = ['ko', 'en']
+const APP_THEME_VALUES: AppTheme[] = ['system', 'light', 'dark']
+const APP_UI_SCALE_VALUES: AppUiScale[] = [...appUiScaleValues]
 
 function assertNonEmptyString(value: string, label: string): void {
   if (!value.trim()) {
     throw new Error(`${label} is required.`)
+  }
+}
+
+function validateS3PathPart(value: string, label: string): void {
+  if (value.length > 255 || /[\\\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`Invalid ${label}: ${value}`)
   }
 }
 
@@ -63,6 +79,7 @@ export function validateAbsolutePath(filePath: string | null, label: string): vo
 }
 
 export function validateOpenSessionRequest(request: OpenSessionRequest): OpenSessionRequest {
+  assertNonEmptyString(request.profileId, 'Profile')
   validateEc2InstanceId(request.instanceId, 'session target')
   validateTcpPort(request.cols, 'terminal cols')
   validateTcpPort(request.rows, 'terminal rows')
@@ -70,6 +87,8 @@ export function validateOpenSessionRequest(request: OpenSessionRequest): OpenSes
 }
 
 export function validateOpenTunnelSessionRequest(request: OpenTunnelSessionRequest): OpenTunnelSessionRequest {
+  assertNonEmptyString(request.profileId, 'Profile')
+  assertNonEmptyString(request.targetId, 'Tunnel target')
   validateEc2InstanceId(request.jumpInstanceId, 'tunnel jump instance')
   validateEndpoint(request.targetEndpoint)
   validateTcpPort(request.remotePort, 'remote port')
@@ -90,6 +109,56 @@ export function validateUpdateProfileRequest(request: UpdateProfileRequest): Upd
 export function validateUpdateRuntimePathsRequest(request: UpdateRuntimePathsRequest): UpdateRuntimePathsRequest {
   validateAbsolutePath(request.awsCliPath, 'awsCliPath')
   validateAbsolutePath(request.sessionManagerPluginPath, 'sessionManagerPluginPath')
+  return request
+}
+
+export function validateUpdateAppSettingsRequest(request: UpdateAppSettingsRequest): UpdateAppSettingsRequest {
+  if (request.language !== undefined && request.language !== null && !APP_LANGUAGE_VALUES.includes(request.language)) {
+    throw new Error(`Invalid app language: ${request.language}`)
+  }
+
+  if (request.theme !== undefined && request.theme !== null && !APP_THEME_VALUES.includes(request.theme)) {
+    throw new Error(`Invalid app theme: ${request.theme}`)
+  }
+
+  if (request.uiScale !== undefined && request.uiScale !== null && !APP_UI_SCALE_VALUES.includes(request.uiScale)) {
+    throw new Error(`Invalid app UI scale: ${request.uiScale}`)
+  }
+
+  if (request.selectedProfileId !== undefined && request.selectedProfileId !== null) {
+    assertNonEmptyString(request.selectedProfileId, 'Selected profile')
+  }
+
+  return request
+}
+
+export function validateCreateSavedShortcutRequest(request: CreateSavedShortcutRequest): CreateSavedShortcutRequest {
+  assertNonEmptyString(request.label, 'Shortcut label')
+  assertNonEmptyString(request.profileId, 'Shortcut profile')
+  assertNonEmptyString(request.profileName, 'Shortcut profile name')
+  validateAwsRegion(request.region)
+
+  if (request.launchKind === 'ssm') {
+    validateEc2InstanceId(request.payload.instanceId, 'shortcut session target')
+    assertNonEmptyString(request.payload.instanceName, 'Shortcut instance name')
+    return request
+  }
+
+  validateEc2InstanceId(request.payload.jumpInstanceId, 'shortcut tunnel jump instance')
+  assertNonEmptyString(request.payload.jumpInstanceName, 'Shortcut jump instance name')
+  assertNonEmptyString(request.payload.targetId, 'Shortcut target')
+  assertNonEmptyString(request.payload.targetName, 'Shortcut target name')
+  validateEndpoint(request.payload.targetEndpoint)
+  validateTcpPort(request.payload.remotePort, 'shortcut remote port')
+  validateTcpPort(request.payload.preferredLocalPort, 'shortcut preferred local port')
+  return request
+}
+
+export function validateListS3ObjectsRequest(request: ListS3ObjectsRequest): ListS3ObjectsRequest {
+  assertNonEmptyString(request.profileId, 'Profile')
+  assertNonEmptyString(request.bucketName, 'Bucket name')
+  validateS3PathPart(request.prefix, 'S3 prefix')
+  validateS3PathPart(request.query, 'S3 query')
   return request
 }
 

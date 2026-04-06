@@ -4,19 +4,25 @@ import os from 'node:os'
 import path from 'node:path'
 
 import type {
+  AppSettingsState,
   AppProfileSummary,
   AppReadinessState,
+  CreateSavedShortcutRequest,
   CreateProfileRequest,
+  ListS3ObjectsRequest,
   OpenTunnelSessionRequest,
   OpenSessionRequest,
   RuntimeConfigState,
+  SessionTabState,
   SessionErrorEvent,
   SessionExitEvent,
   SessionOutputEvent,
+  TunnelSessionState,
   TunnelErrorEvent,
   TunnelExitEvent,
   TunnelKind,
   TunnelLogEvent,
+  UpdateAppSettingsRequest,
   UpdateProfileRequest,
   UpdateRuntimePathsRequest
 } from '../shared/contracts'
@@ -25,15 +31,22 @@ import { buildAppReadinessState } from './app-readiness'
 import { detectDependencies } from './dependencies'
 import { listEc2Instances } from './ec2-client'
 import { ipcChannels } from './ipc'
+import { resolvePreferredLocalPort } from './local-port-resolver'
 import { AppProfileStore } from './profile-store'
+import { QuickAccessLauncher } from './quick-access-launcher'
+import { QuickAccessStore } from './quick-access-store'
 import { registerRendererProtocol } from './renderer-protocol'
 import { buildExecutionContext } from './runtime-context'
+import { listS3Buckets, listS3Objects } from './s3-client'
 import {
   shouldEnableRemoteDebugging,
+  validateCreateSavedShortcutRequest,
   validateAwsRegion,
   validateCreateProfileRequest,
+  validateListS3ObjectsRequest,
   validateOpenSessionRequest,
   validateOpenTunnelSessionRequest,
+  validateUpdateAppSettingsRequest,
   validateUpdateProfileRequest,
   validateUpdateRuntimePathsRequest
 } from './security'
@@ -43,6 +56,7 @@ import { listTunnelTargets } from './tunnel-targets'
 
 let mainWindow: BrowserWindow | null = null
 let profileStore: AppProfileStore | null = null
+let quickAccessStore: QuickAccessStore | null = null
 
 const sessionManager = new SsmSessionManager()
 const tunnelSessionManager = new TunnelSessionManager()
@@ -63,6 +77,14 @@ function getProfileStore(): AppProfileStore {
   }
 
   return profileStore
+}
+
+function getQuickAccessStore(): QuickAccessStore {
+  if (!quickAccessStore) {
+    throw new Error('Quick access store is unavailable before app startup.')
+  }
+
+  return quickAccessStore
 }
 
 function toProfileSummary(profile: AppProfileSummary): AppProfileSummary {
@@ -97,20 +119,24 @@ async function getRuntimeConfig(): Promise<RuntimeConfigState> {
   }
 }
 
-async function hasLegacyProfiles(): Promise<boolean> {
+async function getAppSettings(): Promise<AppSettingsState> {
   const settings = await getProfileStore().getRuntimeSettings()
-  if (settings.legacyImportDismissedAt) {
-    return false
+  return {
+    language: settings.language,
+    theme: settings.theme,
+    uiScale: settings.uiScale,
+    selectedProfileId: settings.selectedProfileId
   }
+}
 
+async function hasLegacyProfiles(): Promise<boolean> {
   const credentialsContent = await readOptionalFile(awsFilePath('credentials'))
   return listCredentialProfiles(credentialsContent).length > 0
 }
 
 async function getAppReadiness(): Promise<AppReadinessState> {
-  const [profiles, activeProfile, runtimeConfig, canImportLegacyProfiles, settings] = await Promise.all([
+  const [profiles, runtimeConfig, canImportLegacyProfiles, settings] = await Promise.all([
     listStoredProfiles(),
-    getProfileStore().getActiveProfile(),
     getRuntimeConfig(),
     hasLegacyProfiles(),
     getProfileStore().getRuntimeSettings()
@@ -120,8 +146,13 @@ async function getAppReadiness(): Promise<AppReadinessState> {
   return buildAppReadinessState({
     dependencyStatus,
     profiles,
-    activeProfile: activeProfile ?? null,
     runtimeConfig,
+    appSettings: {
+      language: settings.language,
+      theme: settings.theme,
+      uiScale: settings.uiScale,
+      selectedProfileId: settings.selectedProfileId
+    },
     canImportLegacyProfiles,
     keychainAccessNoticeAcceptedAt: settings.keychainAccessNoticeAcceptedAt
   })
@@ -132,20 +163,80 @@ async function resetWorkspaceState(): Promise<void> {
   await tunnelSessionManager.closeAllTunnelSessions()
 }
 
-async function requireActiveProfileCredentials() {
-  const activeProfile = await getProfileStore().getActiveProfileCredentials()
-  if (!activeProfile) {
-    throw new Error('Create or select an app-managed AWS profile before running actions.')
-  }
-
-  validateAwsRegion(activeProfile.profile.region)
-  return activeProfile
+async function closeProfileWorkspaceState(profileId: string): Promise<void> {
+  await Promise.all([
+    ...sessionManager
+      .listSessions()
+      .filter((session) => session.profileId === profileId)
+      .map((session) => sessionManager.closeSession(session.id)),
+    ...tunnelSessionManager
+      .listSessions()
+      .filter((session) => session.profileId === profileId)
+      .map((session) => tunnelSessionManager.closeTunnelSession(session.id))
+  ])
 }
 
-async function requireExecutionContext() {
-  const activeProfile = await requireActiveProfileCredentials()
+async function requireProfileCredentials(profileId: string) {
+  const activeProfile = await getProfileStore().getProfileCredentials(profileId)
   const dependencyStatus = await detectDependencies(await getRuntimeConfig())
+  validateAwsRegion(activeProfile.profile.region)
+  return { activeProfile, dependencyStatus }
+}
+
+async function requireExecutionContext(profileId: string) {
+  const { activeProfile, dependencyStatus } = await requireProfileCredentials(profileId)
   return buildExecutionContext(activeProfile, dependencyStatus)
+}
+
+async function recordSsmRecentLaunch(context: Awaited<ReturnType<typeof requireExecutionContext>>, session: SessionTabState): Promise<void> {
+  await getQuickAccessStore().recordRecentLaunch({
+    label: `${session.instanceName} shell`,
+    profileId: context.profile.id,
+    profileName: context.profile.name,
+    region: context.profile.region,
+    launchKind: 'ssm',
+    payload: {
+      instanceId: session.instanceId,
+      instanceName: session.instanceName
+    }
+  })
+}
+
+async function recordTunnelRecentLaunch(
+  context: Awaited<ReturnType<typeof requireExecutionContext>>,
+  session: TunnelSessionState,
+  targetId: string
+): Promise<void> {
+  await getQuickAccessStore().recordRecentLaunch({
+    label: `${session.targetName} tunnel`,
+    profileId: context.profile.id,
+    profileName: context.profile.name,
+    region: context.profile.region,
+    launchKind: 'tunnel',
+    payload: {
+      targetId,
+      targetKind: session.targetKind,
+      targetName: session.targetName,
+      targetEndpoint: session.targetEndpoint,
+      remotePort: session.remotePort,
+      jumpInstanceId: session.jumpInstanceId,
+      jumpInstanceName: session.jumpInstanceName,
+      preferredLocalPort: session.localPort
+    }
+  })
+}
+
+function createQuickAccessLauncher(): QuickAccessLauncher {
+  return new QuickAccessLauncher({
+    quickAccessStore: getQuickAccessStore(),
+    getExecutionContext: (profileId) => requireExecutionContext(profileId),
+    listEc2Instances: async (profileId) => listEc2Instances((await requireProfileCredentials(profileId)).activeProfile),
+    listTunnelTargets: async (profileId, kind: TunnelKind) =>
+      listTunnelTargets((await requireProfileCredentials(profileId)).activeProfile, kind),
+    openSsmSession: (options) => sessionManager.openSession(options),
+    openTunnelSession: (options) => tunnelSessionManager.openTunnelSession(options),
+    resolvePreferredTunnelPort: (port: number) => resolvePreferredLocalPort(port)
+  })
 }
 
 function emitToRenderer<T>(channel: string, payload: T): void {
@@ -184,36 +275,34 @@ function registerSessionEvents(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle(ipcChannels.getAppReadiness, () => getAppReadiness())
+  ipcMain.handle(ipcChannels.updateAppSettings, async (_event, request: UpdateAppSettingsRequest) => {
+    const validatedRequest = validateUpdateAppSettingsRequest(request)
+    const settings = await getProfileStore().updateRuntimeSettings({
+      ...(validatedRequest.language !== undefined ? { language: validatedRequest.language ?? null } : {}),
+      ...(validatedRequest.theme !== undefined ? { theme: validatedRequest.theme ?? null } : {}),
+      ...(validatedRequest.uiScale !== undefined ? { uiScale: validatedRequest.uiScale ?? null } : {}),
+      ...(validatedRequest.selectedProfileId !== undefined ? { selectedProfileId: validatedRequest.selectedProfileId ?? null } : {})
+    })
+    return {
+      language: settings.language,
+      theme: settings.theme,
+      uiScale: settings.uiScale,
+      selectedProfileId: settings.selectedProfileId
+    }
+  })
   ipcMain.handle(ipcChannels.listProfiles, () => listStoredProfiles())
   ipcMain.handle(ipcChannels.createProfile, async (_event, request: CreateProfileRequest) => {
     const profile = await getProfileStore().createProfile(validateCreateProfileRequest(request))
-    await resetWorkspaceState()
     return toProfileSummary(profile)
   })
   ipcMain.handle(ipcChannels.updateProfile, async (_event, request: UpdateProfileRequest) => {
     const profile = await getProfileStore().updateProfile(request.id, validateUpdateProfileRequest(request))
-    const activeProfile = await getProfileStore().getActiveProfileCredentials()
-    if (activeProfile?.profile.id === request.id) {
-      await resetWorkspaceState()
-    }
+    await closeProfileWorkspaceState(request.id)
     return toProfileSummary(profile)
   })
   ipcMain.handle(ipcChannels.deleteProfile, async (_event, profileId: string) => {
-    const activeProfile = await getProfileStore().getActiveProfileCredentials()
+    await closeProfileWorkspaceState(profileId)
     await getProfileStore().deleteProfile(profileId)
-    if (activeProfile?.profile.id === profileId) {
-      await resetWorkspaceState()
-    }
-  })
-  ipcMain.handle(ipcChannels.selectActiveProfile, async (_event, profileId: string) => {
-    const profile = await getProfileStore().selectActiveProfile(profileId)
-    await resetWorkspaceState()
-    return toProfileSummary(profile)
-  })
-  ipcMain.handle(ipcChannels.setDefaultProfile, async (_event, profileId: string) => {
-    const profile = await getProfileStore().setDefaultProfile(profileId)
-    await resetWorkspaceState()
-    return toProfileSummary(profile)
   })
   ipcMain.handle(ipcChannels.getRuntimeConfig, () => getRuntimeConfig())
   ipcMain.handle(ipcChannels.updateRuntimePaths, async (_event, request: UpdateRuntimePathsRequest) => {
@@ -228,7 +317,6 @@ function registerIpcHandlers(): void {
       credentialsContent: await readOptionalFile(awsFilePath('credentials')),
       configContent: await readOptionalFile(awsFilePath('config'))
     })
-    await resetWorkspaceState()
     return result
   })
   ipcMain.handle(ipcChannels.dismissLegacyImport, async () => {
@@ -240,18 +328,37 @@ function registerIpcHandlers(): void {
     await getProfileStore().acceptKeychainAccessNotice()
   })
   ipcMain.handle(ipcChannels.resetAppData, async () => {
-    await getProfileStore().resetAppData()
+    await Promise.all([getProfileStore().resetAppData(), getQuickAccessStore().reset()])
     await resetWorkspaceState()
   })
-  ipcMain.handle(ipcChannels.listEc2Instances, async () => listEc2Instances(await requireActiveProfileCredentials()))
-  ipcMain.handle(ipcChannels.listTunnelTargets, async (_event, kind: TunnelKind) =>
-    listTunnelTargets(await requireActiveProfileCredentials(), kind)
+  ipcMain.handle(ipcChannels.getQuickAccess, () => getQuickAccessStore().getQuickAccess())
+  ipcMain.handle(ipcChannels.createSavedShortcut, async (_event, request: CreateSavedShortcutRequest) =>
+    getQuickAccessStore().createSavedShortcut(validateCreateSavedShortcutRequest(request))
+  )
+  ipcMain.handle(ipcChannels.deleteSavedShortcut, async (_event, shortcutId: string) =>
+    getQuickAccessStore().deleteSavedShortcut(shortcutId)
+  )
+  ipcMain.handle(
+    ipcChannels.launchShortcut,
+    async (_event, shortcutId: string, terminalSize: { cols: number; rows: number }) =>
+      createQuickAccessLauncher().launchShortcut(shortcutId, terminalSize)
+  )
+  ipcMain.handle(ipcChannels.listS3Buckets, async (_event, profileId: string) =>
+    listS3Buckets((await requireProfileCredentials(profileId)).activeProfile)
+  )
+  ipcMain.handle(ipcChannels.listS3Objects, async (_event, request: ListS3ObjectsRequest) =>
+    listS3Objects((await requireProfileCredentials(request.profileId)).activeProfile, validateListS3ObjectsRequest(request))
+  )
+  ipcMain.handle(ipcChannels.listEc2Instances, async (_event, profileId: string) =>
+    listEc2Instances((await requireProfileCredentials(profileId)).activeProfile)
+  )
+  ipcMain.handle(ipcChannels.listTunnelTargets, async (_event, profileId: string, kind: TunnelKind) =>
+    listTunnelTargets((await requireProfileCredentials(profileId)).activeProfile, kind)
   )
   ipcMain.handle(ipcChannels.openTunnelSession, async (_event, request: OpenTunnelSessionRequest) => {
     const validatedRequest = validateOpenTunnelSessionRequest(request)
-    const context = await requireExecutionContext()
-
-    return tunnelSessionManager.openTunnelSession({
+    const context = await requireExecutionContext(validatedRequest.profileId)
+    const session = await tunnelSessionManager.openTunnelSession({
       profileId: context.profile.id,
       profileName: context.profile.name,
       region: context.profile.region,
@@ -265,15 +372,16 @@ function registerIpcHandlers(): void {
       awsCliPath: context.awsCliPath,
       env: context.env
     })
+    await recordTunnelRecentLaunch(context, session, validatedRequest.targetId)
+    return session
   })
   ipcMain.handle(ipcChannels.closeTunnelSession, async (_event, sessionId: string) =>
     tunnelSessionManager.closeTunnelSession(sessionId)
   )
   ipcMain.handle(ipcChannels.openSsmSession, async (_event, request: OpenSessionRequest) => {
     const validatedRequest = validateOpenSessionRequest(request)
-    const context = await requireExecutionContext()
-
-    return sessionManager.openSession({
+    const context = await requireExecutionContext(validatedRequest.profileId)
+    const session = await sessionManager.openSession({
       profileId: context.profile.id,
       profileName: context.profile.name,
       region: context.profile.region,
@@ -284,6 +392,8 @@ function registerIpcHandlers(): void {
       awsCliPath: context.awsCliPath,
       env: context.env
     })
+    await recordSsmRecentLaunch(context, session)
+    return session
   })
   ipcMain.handle(ipcChannels.sendSessionInput, async (_event, sessionId: string, data: string) => {
     sessionManager.sendInput(sessionId, data)
@@ -332,6 +442,9 @@ app.whenReady().then(() => {
   profileStore = new AppProfileStore({
     userDataPath: app.getPath('userData'),
     safeStorage
+  })
+  quickAccessStore = new QuickAccessStore({
+    userDataPath: app.getPath('userData')
   })
 
   registerSessionEvents()

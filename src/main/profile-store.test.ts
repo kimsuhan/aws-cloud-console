@@ -20,6 +20,10 @@ interface StoredProfilesFile {
     activeProfileId: string | null
     awsCliPath: string | null
     sessionManagerPluginPath: string | null
+    language: 'ko' | 'en' | null
+    theme: 'system' | 'light' | 'dark' | null
+    uiScale: 'system' | '90' | '100' | '110' | '120' | null
+    selectedProfileId: string | null
     legacyImportDismissedAt: string | null
     keychainAccessNoticeAcceptedAt: string | null
   }
@@ -70,6 +74,10 @@ test('createProfile stores metadata separately from encrypted secrets and select
       activeProfileId: 'profile-1',
       awsCliPath: null,
       sessionManagerPluginPath: null,
+      language: null,
+      theme: null,
+      uiScale: null,
+      selectedProfileId: null,
       legacyImportDismissedAt: null,
       keychainAccessNoticeAcceptedAt: null
     })
@@ -232,6 +240,10 @@ test('resetAppData clears profiles, secrets, and stored settings', async () => {
       activeProfileId: null,
       awsCliPath: null,
       sessionManagerPluginPath: null,
+      language: null,
+      theme: null,
+      uiScale: null,
+      selectedProfileId: null,
       legacyImportDismissedAt: null,
       keychainAccessNoticeAcceptedAt: null
     })
@@ -307,6 +319,35 @@ region = ap-northeast-2
     const activeProfile = await store.getActiveProfileCredentials()
     assert.equal(activeProfile?.profile.name, 'default')
     assert.equal(activeProfile?.credentials.accessKeyId, 'AKIADEFAULT')
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('updateRuntimeSettings persists the selected app language, theme, and UI scale', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'profile-store-'))
+
+  try {
+    const store = createStore(rootDir)
+    await store.updateRuntimeSettings({
+      language: 'ko',
+      theme: 'dark',
+      uiScale: '110',
+      selectedProfileId: 'profile-1'
+    })
+
+    const storedProfiles = JSON.parse(
+      await readFile(path.join(rootDir, 'profiles.json'), 'utf8')
+    ) as StoredProfilesFile
+
+    assert.equal(storedProfiles.settings.language, 'ko')
+    assert.equal(storedProfiles.settings.theme, 'dark')
+    assert.equal(storedProfiles.settings.uiScale, '110')
+    assert.equal(storedProfiles.settings.selectedProfileId, 'profile-1')
+    assert.equal((await store.getRuntimeSettings()).language, 'ko')
+    assert.equal((await store.getRuntimeSettings()).theme, 'dark')
+    assert.equal((await store.getRuntimeSettings()).uiScale, '110')
+    assert.equal((await store.getRuntimeSettings()).selectedProfileId, 'profile-1')
   } finally {
     await rm(rootDir, { recursive: true, force: true })
   }

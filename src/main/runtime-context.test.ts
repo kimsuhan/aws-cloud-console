@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import { buildExecutionContext } from './runtime-context'
 
+const originalPath = process.env['PATH']
+
 const activeProfile = {
   profile: {
     id: 'profile-1',
@@ -45,9 +47,35 @@ test('buildExecutionContext returns resolved binary paths and injected AWS envir
       AWS_SECRET_ACCESS_KEY: 'super-secret',
       AWS_SESSION_TOKEN: 'token-123',
       AWS_REGION: 'ap-northeast-2',
-      AWS_DEFAULT_REGION: 'ap-northeast-2'
+      AWS_DEFAULT_REGION: 'ap-northeast-2',
+      PATH: context.env['PATH']
     }
   })
+  assert.match(context.env['PATH'] ?? '', /(^|:)\/opt\/homebrew\/bin(:|$)/)
+})
+
+test('buildExecutionContext prepends resolved tool directories to PATH for spawned AWS sessions', () => {
+  process.env['PATH'] = '/usr/bin:/bin'
+
+  const context = buildExecutionContext(activeProfile, {
+    awsCli: {
+      installed: true,
+      resolvedPath: '/opt/homebrew/bin/aws',
+      source: 'configured',
+      error: null
+    },
+    sessionManagerPlugin: {
+      installed: true,
+      resolvedPath: '/usr/local/sessionmanagerplugin/bin/session-manager-plugin',
+      source: 'configured',
+      error: null
+    }
+  })
+
+  assert.equal(
+    context.env['PATH'],
+    '/opt/homebrew/bin:/usr/local/sessionmanagerplugin/bin:/usr/bin:/bin'
+  )
 })
 
 test('buildExecutionContext fails closed when required dependencies are missing', () => {
@@ -69,4 +97,13 @@ test('buildExecutionContext fails closed when required dependencies are missing'
       }),
     /Unable to locate aws CLI\./
   )
+})
+
+test.after(() => {
+  if (originalPath === undefined) {
+    delete process.env['PATH']
+    return
+  }
+
+  process.env['PATH'] = originalPath
 })
