@@ -2,99 +2,80 @@
 
 ## Project
 
-- Electron desktop app for AWS profile management, EC2 discovery, SSM shell access, and tunnel sessions.
-- Main process lives in `src/main`, preload in `src/preload`, renderer in `src/renderer/src`, shared contracts in `src/shared`.
-- IPC shapes and channel names live in `src/shared/contracts.ts`; keep main, preload, and renderer in sync when they change.
-- Visible app naming comes from `package.json` (`productName`, `build.productName`); update both when rebranding.
+- Internal developer desktop app for AWS-managed workflows.
+- Main process: `src/main`
+- Preload bridge: `src/preload`
+- Renderer: `src/renderer/src`
+- Shared IPC contracts: `src/shared/contracts.ts`
 
-## Core Commands
+## Core Loop
+
+- Define the problem before editing code.
+- Make small, reversible changes.
+- Verify with tests, build, and live UI checks when needed.
+- Keep docs in sync with behavior changes.
+
+## Daily Commands
 
 - Install: `pnpm install`
 - Dev: `pnpm dev`
-- Dev with remote debugging: `pnpm dev:mcp` (sets `ELECTRON_REMOTE_DEBUGGING_PORT=9222` for attachable devtools/MCP tooling)
-- Electron MCP server: `pnpm mcp:electron` (runs `npx -y @ohah/electron-mcp-server`)
-- Test: `pnpm test` (matches `src/**/*.test.ts` and `src/**/*.test.tsx`)
+- Dev with remote debugging: `pnpm dev:mcp`
+- Electron MCP server: `pnpm mcp:electron`
+- Test: `pnpm test`
 - Build: `pnpm build`
-- Preview production build locally: `pnpm preview`
-- Local macOS DMG: `pnpm dist:mac`
+- Preview packaged renderer: `pnpm preview`
+- Local macOS release: `pnpm dist:mac`
 
-## Stack (reference)
+## Project Rules
 
-- TypeScript + React renderer, Electron main/preload, bundled with `electron-vite` (`pnpm` is the supported package manager).
-- `node-pty` is native; after Node or Electron upgrades, re-check that SSM terminals still spawn and resize correctly.
-
-## Visual verification (Electron MCP)
-
-- When automated tests are insufficient, **run the real app and validate on screen**—including layout, focus, animations, and PTY/resize behavior.
-- Use `@ohah/electron-mcp-server` when you need an agent to **drive the live Electron UI** (open windows, click, capture state) instead of guessing from code alone.
-- Recommended flow:
-  - Terminal A: `pnpm dev:mcp` so the app exposes the debugging port expected by MCP helpers.
-  - Terminal B (or Cursor MCP): `pnpm mcp:electron` so tools can attach to the running app.
-- Treat failures reproduced only in the real UI as **blocking** until understood; add or extend tests when the root cause is clear.
-- This path is **dev-only**; never widen security settings or enable remote debugging for packaged release builds.
-- Wire MCP in the IDE using the project’s MCP config (e.g. `.cursor/mcp.json`) when the environment should attach automatically; otherwise the two-terminal flow above is enough.
-
-## i18n & copy
-
-- Add or tweak user-visible copy through the existing i18n patterns (`src/renderer/src/i18n.tsx`) so Korean and English stay in sync.
-
-## Coding Rules
-
-- Prefer `rg` for search.
-- Use `apply_patch` for manual file edits.
+- Read related files before editing them.
+- Use `rg` for search.
+- Use `apply_patch` for manual edits.
 - Do not revert unrelated user changes.
-- Keep renderer APIs behind preload only.
-- Keep Electron security defaults intact:
-  - `contextIsolation: true`
-  - `nodeIntegration: false`
+- Keep renderer access behind preload only.
+- Keep IPC handlers, preload APIs, and `src/shared/contracts.ts` aligned.
+- Add or update tests for behavior changes when practical.
+- Keep long procedures in `docs/`; keep this file short.
 
-## Terminal / SSM Notes
+## Electron Boundaries
 
-- Interactive SSM sessions use `node-pty`.
-- Treat PTY sizing and renderer resize handling as user-facing correctness issues.
-- Avoid shell-string execution for AWS CLI paths; pass executable + args directly.
-
-## Security Notes
-
-- Validate high-risk IPC inputs in main before use.
+- Preserve `contextIsolation: true`.
+- Preserve `nodeIntegration: false`.
+- Do not bypass preload to expose Node or AWS access in the renderer.
+- Validate high-risk IPC input in the main process before using it.
 - Do not broaden CSP for remote content.
 - Do not enable remote debugging in packaged builds.
 
-## Assets
+## AWS / Session Safety
 
-- App icon assets live in `assets/`.
-- If the icon source changes, regenerate:
-  - `assets/aws-cloud.png`
-  - `assets/aws-cloud.iconset/*`
-  - `assets/aws-cloud.icns`
+- Treat profile selection, session launch, and tunnel setup as security-sensitive flows.
+- Avoid shell-string execution for AWS CLI paths; pass executable and args separately.
+- Treat PTY sizing and renderer resize handling as user-facing correctness issues.
+- Fail closed when required AWS dependencies or runtime settings are missing.
+- Never log secrets, session tokens, or private connection details.
 
-## Release Policy
+## UI Verification
 
-- GitHub workflow-based release automation is currently removed.
-- Release work is local/manual until automation is reintroduced.
-- Keep this file at **100 lines** (including section spacing); move long checklists to `docs/` and link from here:
-  - `docs/release_guide.md`
+- For UI-heavy work, do not rely on code inspection alone when behavior is uncertain.
+- Preferred live path:
+  - Start app: `pnpm dev:mcp`
+  - Start MCP server: `pnpm mcp:electron`
+  - Attach through `.mcp.json` or `.cursor/mcp.json`
+- Validate layout, focus, loading states, empty states, session tabs, and terminal resize behavior in the real app when tests are insufficient.
 
-## Release Reference
+## Release Rules
 
-- Before releasing, read `docs/release_guide.md`.
-- That document is the source of truth for:
-  - version bump flow
-  - merge-to-main flow
-  - DMG creation
-  - ad-hoc signing workaround
-  - GitHub release creation
+- Read `docs/release_guide.md` before release work.
+- Release version source is `package.json`.
+- Release branch source of truth is `main`.
+- For release changes, verify:
+  - `pnpm test`
+  - `pnpm build`
+  - `codesign --verify --deep --strict --verbose=2 "release/mac-arm64/AWS Cloud Console.app"`
+  - `hdiutil imageinfo "release/AWS Cloud Console-<version>-arm64.dmg"`
 
-## When updating docs
+## Documentation
 
-- Put long operational procedures in `docs/`.
-- Prefer updating `AGENTS.md` only when a rule affects day-to-day implementation or verification (including MCP-driven UI checks).
-
-## Before claiming work is complete
-
-- Run `pnpm test`. If `tsx` fails with `EPERM` on an IPC pipe inside a sandboxed agent, re-run tests with full permissions or on the host machine.
-- For UI or interaction-heavy changes, back up tests with a quick `pnpm dev` **or** MCP-driven UI verification when uncertainty remains.
-- After IPC or security-sensitive edits, grep for all channel users and update `contracts`, handlers, and tests together.
-- Run `pnpm build` when you touch `electron.vite.config.ts`, preload wiring, or main window/session bootstrap so packaged output still resolves.
-- Live AWS behavior depends on the user’s profiles and network; UI or CLI checks still need human context for real account data.
-- Use `docs/superpowers/plans/` for long architecture write-ups—summarize here only when it changes everyday agent workflow.
+- Update docs when workflows, security assumptions, release steps, or MCP setup change.
+- Agent operations guide: `docs/agent_guide.md`
+- Release guide: `docs/release_guide.md`
