@@ -1,7 +1,7 @@
 {
   "name": "aws-cloud-console",
   "productName": "AWS Cloud Console",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "author": "Suhan Kim",
   "description": "AWS Cloud Console powered by Electron and TypeScript",
