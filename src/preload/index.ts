@@ -1,19 +1,26 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 import type {
+  AppSettingsState,
   AppReadinessState,
   AppProfileSummary,
+  CreateSavedShortcutRequest,
   CreateProfileRequest,
   Ec2InstanceSummary,
   ElectronApi,
   LegacyImportResult,
+  LaunchShortcutResult,
+  ListS3ObjectsRequest,
   OpenTunnelSessionRequest,
   OpenSessionRequest,
+  QuickAccessState,
   SessionErrorEvent,
   SessionExitEvent,
   SessionOutputEvent,
   SessionResizeRequest,
   SessionTabState,
+  S3BucketSummary,
+  S3ObjectListResult,
   TunnelErrorEvent,
   TunnelExitEvent,
   TunnelKind,
@@ -21,6 +28,7 @@ import type {
   TunnelSessionState,
   TunnelTargetSummary,
   RuntimeConfigState,
+  UpdateAppSettingsRequest,
   UpdateProfileRequest,
   UpdateRuntimePathsRequest
 } from '../shared/contracts'
@@ -40,16 +48,14 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const electronApi: ElectronApi = {
   getAppReadiness: () => ipcRenderer.invoke(ipcChannels.getAppReadiness) as Promise<AppReadinessState>,
+  updateAppSettings: (request: UpdateAppSettingsRequest) =>
+    ipcRenderer.invoke(ipcChannels.updateAppSettings, request) as Promise<AppSettingsState>,
   listProfiles: () => ipcRenderer.invoke(ipcChannels.listProfiles) as Promise<AppProfileSummary[]>,
   createProfile: (request: CreateProfileRequest) =>
     ipcRenderer.invoke(ipcChannels.createProfile, request) as Promise<AppProfileSummary>,
   updateProfile: (request: UpdateProfileRequest) =>
     ipcRenderer.invoke(ipcChannels.updateProfile, request) as Promise<AppProfileSummary>,
   deleteProfile: (profileId: string) => ipcRenderer.invoke(ipcChannels.deleteProfile, profileId),
-  selectActiveProfile: (profileId: string) =>
-    ipcRenderer.invoke(ipcChannels.selectActiveProfile, profileId) as Promise<AppProfileSummary>,
-  setDefaultProfile: (profileId: string) =>
-    ipcRenderer.invoke(ipcChannels.setDefaultProfile, profileId) as Promise<AppProfileSummary>,
   getRuntimeConfig: () => ipcRenderer.invoke(ipcChannels.getRuntimeConfig) as Promise<RuntimeConfigState>,
   updateRuntimePaths: (request: UpdateRuntimePathsRequest) =>
     ipcRenderer.invoke(ipcChannels.updateRuntimePaths, request) as Promise<RuntimeConfigState>,
@@ -57,9 +63,18 @@ const electronApi: ElectronApi = {
   dismissLegacyImport: () => ipcRenderer.invoke(ipcChannels.dismissLegacyImport),
   acknowledgeKeychainAccessNotice: () => ipcRenderer.invoke(ipcChannels.acknowledgeKeychainAccessNotice),
   resetAppData: () => ipcRenderer.invoke(ipcChannels.resetAppData),
-  listEc2Instances: () => ipcRenderer.invoke(ipcChannels.listEc2Instances) as Promise<Ec2InstanceSummary[]>,
-  listTunnelTargets: (kind: TunnelKind) =>
-    ipcRenderer.invoke(ipcChannels.listTunnelTargets, kind) as Promise<TunnelTargetSummary[]>,
+  getQuickAccess: () => ipcRenderer.invoke(ipcChannels.getQuickAccess) as Promise<QuickAccessState>,
+  createSavedShortcut: (request: CreateSavedShortcutRequest) =>
+    ipcRenderer.invoke(ipcChannels.createSavedShortcut, request),
+  deleteSavedShortcut: (shortcutId: string) => ipcRenderer.invoke(ipcChannels.deleteSavedShortcut, shortcutId),
+  launchShortcut: (shortcutId: string, terminalSize: { cols: number; rows: number }) =>
+    ipcRenderer.invoke(ipcChannels.launchShortcut, shortcutId, terminalSize) as Promise<LaunchShortcutResult>,
+  listEc2Instances: (profileId: string) => ipcRenderer.invoke(ipcChannels.listEc2Instances, profileId) as Promise<Ec2InstanceSummary[]>,
+  listS3Buckets: (profileId: string) => ipcRenderer.invoke(ipcChannels.listS3Buckets, profileId) as Promise<S3BucketSummary[]>,
+  listS3Objects: (request: ListS3ObjectsRequest) =>
+    ipcRenderer.invoke(ipcChannels.listS3Objects, request) as Promise<S3ObjectListResult>,
+  listTunnelTargets: (profileId: string, kind: TunnelKind) =>
+    ipcRenderer.invoke(ipcChannels.listTunnelTargets, profileId, kind) as Promise<TunnelTargetSummary[]>,
   openTunnelSession: (request: OpenTunnelSessionRequest) =>
     ipcRenderer.invoke(ipcChannels.openTunnelSession, request) as Promise<TunnelSessionState>,
   closeTunnelSession: (sessionId: string) => ipcRenderer.invoke(ipcChannels.closeTunnelSession, sessionId),

@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+import type { AppLanguage, AppTheme, AppUiScale } from '../shared/contracts'
 import { listCredentialProfiles, parseIniSections, resolveProfileRegion } from './aws-config'
 
 export interface AppProfileRecord {
@@ -40,6 +41,10 @@ export interface RuntimeSettings {
   activeProfileId: string | null
   awsCliPath: string | null
   sessionManagerPluginPath: string | null
+  language: AppLanguage | null
+  theme: AppTheme | null
+  uiScale: AppUiScale | null
+  selectedProfileId: string | null
   legacyImportDismissedAt: string | null
   keychainAccessNoticeAcceptedAt: string | null
 }
@@ -90,6 +95,10 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   activeProfileId: null,
   awsCliPath: null,
   sessionManagerPluginPath: null,
+  language: null,
+  theme: null,
+  uiScale: null,
+  selectedProfileId: null,
   legacyImportDismissedAt: null,
   keychainAccessNoticeAcceptedAt: null
 }
@@ -212,6 +221,9 @@ export class AppProfileStore {
     if (state.profilesFile.settings.activeProfileId === profileId) {
       state.profilesFile.settings.activeProfileId = null
     }
+    if (state.profilesFile.settings.selectedProfileId === profileId) {
+      state.profilesFile.settings.selectedProfileId = state.profilesFile.profiles[0]?.id ?? null
+    }
 
     if (deletedProfile.isDefault && state.profilesFile.profiles[0]) {
       state.profilesFile.profiles[0] = {
@@ -254,6 +266,16 @@ export class AppProfileStore {
     }
 
     const state = await this.#readState()
+    return {
+      profile,
+      credentials: this.#decryptCredentials(state.secretsFile.secretsByProfileId[profile.id] ?? '')
+    }
+  }
+
+  async getProfileCredentials(profileId: string): Promise<ActiveProfileWithCredentials> {
+    const state = await this.#readState()
+    const profile = this.#requireProfile(state, profileId)
+
     return {
       profile,
       credentials: this.#decryptCredentials(state.secretsFile.secretsByProfileId[profile.id] ?? '')

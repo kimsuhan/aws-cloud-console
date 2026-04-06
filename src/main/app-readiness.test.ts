@@ -18,7 +18,7 @@ const dependencyStatus = {
   }
 }
 
-test('buildAppReadinessState requests keychain notice when active profile exists and notice is not accepted', () => {
+test('buildAppReadinessState requests keychain notice when profiles exist and notice is not accepted', () => {
   const readiness = buildAppReadinessState({
     dependencyStatus,
     profiles: [
@@ -32,18 +32,15 @@ test('buildAppReadinessState requests keychain notice when active profile exists
         isDefault: true
       }
     ],
-    activeProfile: {
-      id: 'profile-1',
-      name: 'dev-admin',
-      region: 'ap-northeast-2',
-      createdAt: '2026-03-31T00:00:00.000Z',
-      updatedAt: '2026-03-31T00:00:00.000Z',
-      hasSessionToken: false,
-      isDefault: true
-    },
     runtimeConfig: {
       awsCliPath: null,
       sessionManagerPluginPath: null
+    },
+    appSettings: {
+      language: null,
+      theme: null,
+      uiScale: null,
+      selectedProfileId: null
     },
     canImportLegacyProfiles: false,
     keychainAccessNoticeAcceptedAt: null
@@ -66,18 +63,15 @@ test('buildAppReadinessState skips keychain notice after acceptance', () => {
         isDefault: true
       }
     ],
-    activeProfile: {
-      id: 'profile-1',
-      name: 'dev-admin',
-      region: 'ap-northeast-2',
-      createdAt: '2026-03-31T00:00:00.000Z',
-      updatedAt: '2026-03-31T00:00:00.000Z',
-      hasSessionToken: false,
-      isDefault: true
-    },
     runtimeConfig: {
       awsCliPath: null,
       sessionManagerPluginPath: null
+    },
+    appSettings: {
+      language: null,
+      theme: null,
+      uiScale: null,
+      selectedProfileId: null
     },
     canImportLegacyProfiles: false,
     keychainAccessNoticeAcceptedAt: '2026-03-31T00:00:00.000Z'

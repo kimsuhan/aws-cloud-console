@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 import type { DependencyStatus } from './dependencies'
 import type { ActiveProfileWithCredentials, AppProfileRecord } from './profile-store'
 
@@ -6,6 +8,20 @@ export interface ExecutionContext {
   awsCliPath: string
   sessionManagerPluginPath: string
   env: Record<string, string>
+}
+
+function buildRuntimePath(awsCliPath: string, sessionManagerPluginPath: string): string {
+  const entries = [
+    path.dirname(awsCliPath),
+    path.dirname(sessionManagerPluginPath),
+    process.env['PATH'] ?? ''
+  ]
+    .join(path.delimiter)
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+
+  return [...new Set(entries)].join(path.delimiter)
 }
 
 export function buildExecutionContext(
@@ -31,7 +47,11 @@ export function buildExecutionContext(
         ? { AWS_SESSION_TOKEN: activeProfile.credentials.sessionToken }
         : {}),
       AWS_REGION: activeProfile.profile.region,
-      AWS_DEFAULT_REGION: activeProfile.profile.region
+      AWS_DEFAULT_REGION: activeProfile.profile.region,
+      PATH: buildRuntimePath(
+        dependencyStatus.awsCli.resolvedPath,
+        dependencyStatus.sessionManagerPlugin.resolvedPath
+      )
     }
   }
 }
